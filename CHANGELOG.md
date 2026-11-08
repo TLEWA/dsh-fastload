@@ -1,5 +1,27 @@
 # Changelog / 更新日志
 
+## 0.2.0 — 2026-11-09
+
+### English
+
+- Add a web-client half: after the first paint, if the reduced transcript is
+  shorter than the viewport, press the built-in "Load older" button once so the
+  tail context matches stock 500/50/2. The click reuses
+  `ChatNavigation.loadEarlier()` and its viewport anchor compensation.
+- Skip the fill when the transcript already scrolls; never auto-paginate more
+  than one page per mounted transcript.
+- Filter out nested reasoning/tool-step `data-chat-flow` nodes and wait for a
+  short input-idle window before clicking.
+
+### 中文
+
+- 新增 Web 客户端部分：首帧后如果缩小后的 transcript 比视口短，就自动点一次
+  内置“加载更早”，使尾部上下文与 stock 500/50/2 一致。点击复用
+  `ChatNavigation.loadEarlier()` 及其视口锚点补偿。
+- transcript 已经可滚动时不补齐；每个挂载的 transcript 最多自动翻一页。
+- 过滤 reasoning/tool-step 内嵌的 `data-chat-flow` 节点，并在输入空闲窗口后
+  才点击。
+
 ## 0.1.0 — 2026-11-09
 
 ### English

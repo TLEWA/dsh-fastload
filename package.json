@@ -1,16 +1,18 @@
 {
   "name": "dsh-fastload",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "Reduce the first history page of long DSH sessions to two visible turns.",
   "license": "MIT",
   "main": "index.js",
   "exports": {
     ".": "./index.js",
+    "./client": "./client.js",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
+    "client.js",
     "src",
     "cordis.patch.yml",
     "README.md",
@@ -21,6 +23,11 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
     }
   },
   "engines": {

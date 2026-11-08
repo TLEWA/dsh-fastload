@@ -24,7 +24,10 @@ client session open
   -> initial request rewritten to maxMessages: 100 / minMessages: 40 / minTurns: 2
   -> optional: first snapshot records trimmed at turn/start boundaries
   -> ChatFlow mounts the smaller page
-  -> "load older" sends beforeSeq and bypasses the plugin
+  -> web client sees a non-scrollable transcript
+  -> presses the built-in "Load older" once (idle, one page per mount)
+  -> ChatNavigation.loadEarlier() anchors the viewport, then sends beforeSeq;
+     the plugin leaves this page untouched
 ```
 
 ## Safety rules
@@ -37,12 +40,35 @@ client session open
 6. If they exceed the hard cap, the page is returned unchanged.
 7. The plugin is idempotent: `sessionController.follow` is marked with
    `__dshFastload` and never wrapped twice.
+8. The client fill only acts when `scrollHeight <= clientHeight` (plus a
+   small slack), only on the transcript flow that owns
+   `data-slot="conversation.chat.flow"`, and only once per mounted flow.
+
+## Background fill
+
+A reduced page can be shorter than the viewport (the 42fe session: 363 anchors,
+165 px, 177 visible characters, versus stock's 780 anchors, 1,187 px, 682
+characters). A page that short has a real visible-content gap, not just fewer
+rows above the fold.
+
+The client half waits about 900 ms, postpones while the user is typing or
+scrolling, and then presses the transcript's own "Load older" button. That
+button runs `ChatNavigation.loadEarlier()`, which calls
+`viewport.beginPaging()` before `input.loadOlder()`. The resulting prepend
+keeps the current row anchored; a direct `session.loadOlder()` would skip that
+compensation.
+
+Measured in the test profile: the fill took 191 ms, produced a 136 ms long
+task, and restored the 42fe page to 780 anchors, 14,504 DOM nodes and
+`scrollTop = 461` — the same viewport as stock. The 7c38 fat-turn session
+already scrolls (3,622 px), so the client skips it and keeps the 268-anchor
+first page.
 
 ## What is intentionally absent
 
-- No client bundle: the change is entirely a Host request/snapshot transform.
 - No DOM virtualization: that is a separate, larger change; this plugin only
-  reduces the initial page.
+  reduces the initial page and fills a short viewport once.
+- No general auto-pagination: one page per mounted transcript.
 - No cache: it does not make "load older" faster, and it does not reduce the
   Host's full log decode.
 
