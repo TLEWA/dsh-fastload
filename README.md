@@ -50,9 +50,17 @@ cd dsh-fastload
 npm test
 ```
 
-Add the package to a DSH profile, or apply its `cordis.patch.yml` through your
-normal plugin/profile patch flow. The package exports a host plugin with
-`inject = ['sessionController']`; no client bundle is required.
+Install the package into the profile's `node_modules`, then add this to the
+profile patch (or pass the same YAML with `--patch`):
+
+```yaml
+- insert:
+    - id: dsh-fastload
+      name: 'dsh-fastload'
+```
+
+The package exports a host plugin with `inject = ['sessionController']`; no
+client bundle is required.
 
 ### Verification
 
@@ -101,6 +109,17 @@ turn。
 | `DSH_FASTLOAD_MAX_BYTES` | `0` | 软字节预算；`0` 表示不按字节裁。 |
 | `DSH_FASTLOAD_HARD_CAP_BYTES` | `8388608` | 受保护 turn 超过该值时不再裁切。 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条 DSH 日志。 |
+
+### 安装到 profile
+
+把包安装到 profile 的 `node_modules`，然后在 profile patch（或用 `--patch`
+传入）中加入：
+
+```yaml
+- insert:
+    - id: dsh-fastload
+      name: 'dsh-fastload'
+```
 
 ### 开发与验证
 
