@@ -72,6 +72,15 @@ export function apply(ctx) {
 
   if (!config.enabled) return;
 
+  const banner =
+    '[dsh-fastload] active: initial page ' +
+    config.maxMessages + '/' + config.minMessages + '/' + config.minTurns +
+    ', maxBytes=' + config.maxBytes;
+  try {
+    ctx.logger?.info?.(banner);
+  } catch {}
+  if (config.debug) process.stderr.write(banner + '\n');
+
   ctx.inject(['sessionController'], (c) => {
     try {
       const sc = c.get('sessionController');
