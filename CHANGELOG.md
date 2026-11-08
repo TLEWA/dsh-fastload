@@ -1,5 +1,19 @@
 # Changelog / 更新日志
 
+## 0.2.1 — 2026-11-09
+
+### English
+
+- Republish the 0.2.0 content under a new version. npm created a staged
+  `0.0.0-stage` placeholder for the first publish and never released 0.2.0
+  (npm/cli#9889); there are no runtime changes in this release.
+
+### 中文
+
+- 用新版本号重新发布 0.2.0 的内容。npm 在首次发布时创建了
+  `0.0.0-stage` 占位版本，导致 0.2.0 没有真正上线（npm/cli#9889）；本次
+  发布没有运行时改动。
+
 ## 0.2.0 — 2026-11-09
 
 ### English

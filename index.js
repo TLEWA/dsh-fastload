@@ -61,7 +61,7 @@ function wrapFirstSnapshot(result, config, state, ctx) {
 export function apply(ctx) {
   const config = readConfig(process.env);
   const state = {
-    version: '0.2.0',
+    version: '0.2.1',
     config,
     installed: false,
     trims: 0,
