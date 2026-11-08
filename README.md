@@ -57,15 +57,19 @@ text). Two turns normally keep the previous turn's readable context in view.
 | `DSH_FASTLOAD_HARD_CAP_BYTES` | `8388608` | Never trim below the protected turns if they exceed this. |
 | `DSH_FASTLOAD_DEBUG` | `0` | Log each trim through the DSH logger. |
 
-### Install for development
+### Install
 
-```bash
-git clone <repo> dsh-fastload
-cd dsh-fastload
-npm test
-```
+- **DSH Desktop:** open **Plugins → Add plugin**, enter `dsh-fastload`, and
+  confirm. The desktop app manages its own profile; do not use the CLI for it.
+- **`dsh web` or a custom profile:** run
+  `dsh plugin --profile web add dsh-fastload` and restart that host.
+- **Local development:** clone the repository, run `npm test`, and add the
+  checkout as a local plugin through the same Add plugin dialog (or
+  `dsh plugin --profile <profile> add <local-path>`).
 
-Install the package into the profile's `node_modules`, then add this to the
+The package contains its own bundle patch, so no extra YAML is needed when the
+plugin is installed through the profile manager. For a manual profile overlay,
+install the package into the profile's `node_modules`, then add this to the
 profile patch (or pass the same YAML with `--patch`):
 
 ```yaml
@@ -137,10 +141,19 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_HARD_CAP_BYTES` | `8388608` | 受保护 turn 超过该值时不再裁切。 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条 DSH 日志。 |
 
-### 安装到 profile
+### 安装
 
-把包安装到 profile 的 `node_modules`，然后在 profile patch（或用 `--patch`
-传入）中加入：
+- **DSH 桌面版：** 打开 **插件 → 添加插件**，输入 `dsh-fastload` 并确认。
+  桌面版管理自己的 profile，不要用 CLI 安装到桌面 profile。
+- **`dsh web` 或自定义 profile：** 运行
+  `dsh plugin --profile web add dsh-fastload`，然后重启该 Host。
+- **本地开发：** 克隆仓库、运行 `npm test`，再通过同一个“添加插件”对话框
+  选择本地目录（或使用
+  `dsh plugin --profile <profile> add <本地路径>`）。
+
+包内自带 bundle patch，通过 profile 管理器安装时不需要额外 YAML。若要手工
+写 profile overlay，把包安装到 profile 的 `node_modules`，然后在 profile
+patch（或用 `--patch` 传入）中加入：
 
 ```yaml
 - insert:

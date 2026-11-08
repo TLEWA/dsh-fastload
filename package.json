@@ -4,6 +4,26 @@
   "type": "module",
   "description": "Reduce the first history page of long DSH sessions to two visible turns.",
   "license": "MIT",
+  "author": "TLEWA",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TLEWA/dsh-fastload.git"
+  },
+  "homepage": "https://github.com/TLEWA/dsh-fastload#readme",
+  "bugs": {
+    "url": "https://github.com/TLEWA/dsh-fastload/issues"
+  },
+  "keywords": [
+    "deepseek",
+    "harness",
+    "dsh",
+    "dsh-plugin",
+    "session",
+    "history",
+    "performance",
+    "lazy-load",
+    "virtualization"
+  ],
   "main": "index.js",
   "exports": {
     ".": "./index.js",
