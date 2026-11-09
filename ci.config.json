@@ -16,7 +16,7 @@
     "pairs": [
       [
         "README.md",
-        "README.zh-CN.md"
+        "README.en.md"
       ],
       [
         "CHANGELOG.md",
@@ -32,14 +32,14 @@
       ".github/workflows/ci.yml",
       ".github/workflows/drift.yml",
       ".github/workflows/release.yml",
-      "README.zh-CN.md",
+      "README.en.md",
       "CHANGELOG.zh-CN.md"
     ],
     "published": [
       "README.md",
       "CHANGELOG.md",
       "LICENSE",
-      "README.zh-CN.md",
+      "README.en.md",
       "CHANGELOG.zh-CN.md"
     ]
   },
@@ -51,7 +51,7 @@
       "README.md",
       "CHANGELOG.md",
       "LICENSE",
-      "README.zh-CN.md",
+      "README.en.md",
       "CHANGELOG.zh-CN.md"
     ],
     "mustExclude": [
