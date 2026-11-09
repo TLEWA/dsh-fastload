@@ -1,5 +1,11 @@
 # 更新日志
 
+## [Unreleased]
+
+### 中文
+
+- 文档：README 改为中文主文档，原英文 README 迁移到 `README.en.md`；同步 `ci.config.json` 与 `package.json` 的发布清单。
+
 ## 0.2.1 — 2026-11-09
 
 ### 中文

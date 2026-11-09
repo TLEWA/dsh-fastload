@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### English
+
+- Docs: README is now the Chinese primary document, and the English edition moved to `README.en.md`; synced the release manifest in `ci.config.json` and `package.json`.
+
 ## 0.2.1 — 2026-11-09
 
 ### English

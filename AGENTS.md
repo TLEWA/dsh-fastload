@@ -50,7 +50,7 @@
 
 - `npm test` 使用 `node --test`；行为改动必须同时补 `test/plugin.test.js`、`test/trim.test.js`
   或 `test/package.test.js`。不要依赖手工 CDP 代替可自动化的纯逻辑测试。
-- `README.md`/`README.zh-CN.md` 与 `CHANGELOG.md`/`CHANGELOG.zh-CN.md` 成对维护；每次行为变更两种语言都要写。
+- `README.md` 是中文主文档，`README.en.md` 是英文；`CHANGELOG.md`/`CHANGELOG.zh-CN.md` 也成对维护；每次行为变更两种语言都要写。
 - `files` 会发布 `src/**` 与 `docs/**`，不要把测试、临时日志或本地 `.dsh-meow` 带进包。
 
 ## 每次改动
