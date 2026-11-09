@@ -38,7 +38,9 @@
     "README.md",
     "CHANGELOG.md",
     "LICENSE",
-    "docs"
+    "docs",
+    "README.zh-CN.md",
+    "CHANGELOG.zh-CN.md"
   ],
   "dsh": {
     "bundle": {
@@ -48,12 +50,15 @@
       "platform": "web",
       "immediately": true,
       "inject": []
-    }
+    },
+    "manifestVersion": 1
   },
   "engines": {
+    "node": ">=20",
     "dsh": ">=0.2.0-rc.1"
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "prepublishOnly": "npx --yes --package=github:TLEWA/dsh-plugin-ci#v1 dsh-ci-gate --prepublish"
   }
 }
