@@ -1,4 +1,5 @@
 node_modules/
+.ci/
 .dsh-meow/
 *.log
 .DS_Store
