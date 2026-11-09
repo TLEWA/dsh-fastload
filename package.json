@@ -40,7 +40,7 @@
     "LICENSE",
     "docs",
     "README.en.md",
-    "CHANGELOG.zh-CN.md"
+    "CHANGELOG.en.md"
   ],
   "dsh": {
     "bundle": {

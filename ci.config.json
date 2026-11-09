@@ -20,7 +20,7 @@
       ],
       [
         "CHANGELOG.md",
-        "CHANGELOG.zh-CN.md"
+        "CHANGELOG.en.md"
       ]
     ],
     "required": [
@@ -33,14 +33,14 @@
       ".github/workflows/drift.yml",
       ".github/workflows/release.yml",
       "README.en.md",
-      "CHANGELOG.zh-CN.md"
+      "CHANGELOG.en.md"
     ],
     "published": [
       "README.md",
       "CHANGELOG.md",
       "LICENSE",
       "README.en.md",
-      "CHANGELOG.zh-CN.md"
+      "CHANGELOG.en.md"
     ]
   },
   "tarball": {
@@ -52,7 +52,7 @@
       "CHANGELOG.md",
       "LICENSE",
       "README.en.md",
-      "CHANGELOG.zh-CN.md"
+      "CHANGELOG.en.md"
     ],
     "mustExclude": [
       "test/**",
