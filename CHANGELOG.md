@@ -10,6 +10,7 @@
 ### 文档
 
 - 更新日志改为与其他插件一致的布局：`CHANGELOG.md` 为中文主文档，英文版迁移到 `CHANGELOG.en.md`；同步 `ci.config.json` 与 `package.json` 的发布清单。
+- 修正 `DSH_FASTLOAD_ENABLED` 文档：设为 `0` 只关闭 Host 端首屏改写与裁剪，Web 端一次后台补齐仍会运行；行为未变，仅让文字与实现一致。
 
 ## 0.2.1 — 2026-11-09
 

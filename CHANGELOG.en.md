@@ -10,6 +10,7 @@ All notable changes are documented here. Versions follow
 ### Docs
 
 - The changelog now follows the other plugins' layout: `CHANGELOG.md` is the Chinese primary document and the English edition moved to `CHANGELOG.en.md`; synced the release manifest in `ci.config.json` and `package.json`.
+- Correct the `DSH_FASTLOAD_ENABLED` documentation: setting it to `0` disables only the host-side first-page rewrite and trim, and the web client still fills one page. Behavior is unchanged; the text now matches the implementation.
 
 ## 0.2.1 — 2026-11-09
 
