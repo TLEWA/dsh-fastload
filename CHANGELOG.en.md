@@ -7,6 +7,8 @@ All notable changes are documented here. Versions follow
 
 ## [Unreleased]
 
+- Adopt shared Codex PR review rules and repository-specific review guidance; preserve existing CI, human approval, and release behavior.
+
 ### Docs
 
 - The changelog now follows the other plugins' layout: `CHANGELOG.md` is the Chinese primary document and the English edition moved to `CHANGELOG.en.md`; synced the release manifest in `ci.config.json` and `package.json`.
