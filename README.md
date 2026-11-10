@@ -40,7 +40,7 @@ firstAnchor 看起来很快，实际上是一个空页。
 
 | 环境变量 | 默认值 | 含义 |
 |---|---:|---|
-| `DSH_FASTLOAD_ENABLED` | `1` | 设为 `0` 可完全关闭。 |
+| `DSH_FASTLOAD_ENABLED` | `1` | 设为 `0` 只关闭 Host 端首屏改写与裁剪；Web 端一次后台补齐仍会运行。 |
 | `DSH_FASTLOAD_FORCE` | `0` | 强制改写所有首屏，包括显式的小页。 |
 | `DSH_FASTLOAD_MAX_MESSAGES` | `100` | 首屏消息上限。 |
 | `DSH_FASTLOAD_MIN_MESSAGES` | `40` | turnWindow 允许裁切前的最小消息数。 |
