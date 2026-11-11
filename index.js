@@ -58,17 +58,45 @@ function wrapFirstSnapshot(result, config, state, ctx) {
   return result;
 }
 
-export function apply(ctx) {
-  const config = readConfig(process.env);
+const STATE_VERSION = '0.2.1';
+const CORDIS_ORIGINAL = Symbol.for('cordis.original');
+
+/**
+ * Reuse the diagnostics object for the same version so a wrapper left over from
+ * an earlier install never writes into an orphaned state.
+ */
+function reuseState() {
+  const existing = globalThis.__DSH_FASTLOAD__;
+  if (existing && typeof existing === 'object' && existing.version === STATE_VERSION) {
+    return existing;
+  }
   const state = {
-    version: '0.2.1',
-    config,
+    version: STATE_VERSION,
+    config: null,
     installed: false,
     trims: 0,
     lastTrim: null,
     error: null,
   };
   globalThis.__DSH_FASTLOAD__ = state;
+  return state;
+}
+
+/**
+ * Raw service behind cordis's traceable proxy. Reads through that proxy create
+ * a fresh shadow for every function property, so restored functions must be
+ * compared and written on the target, never on the public object.
+ */
+function installTarget(service) {
+  return (service && service[CORDIS_ORIGINAL]) || service;
+}
+
+export function apply(ctx) {
+  const config = readConfig(process.env);
+  const state = reuseState();
+  state.config = config;
+  state.installed = false;
+  state.error = null;
 
   if (!config.enabled) return;
 
@@ -83,16 +111,34 @@ export function apply(ctx) {
   if (config.debug) process.stderr.write(banner + '\n');
 
   ctx.inject(['sessionController'], (c) => {
+    let sc;
     try {
-      const sc = c.get('sessionController');
-      if (!sc || typeof sc.follow !== 'function') {
-        state.error = 'sessionController.follow is unavailable';
-        return;
-      }
-      if (sc.__dshFastload) return;
+      sc = c.get('sessionController');
+    } catch (error) {
+      state.error = String((error && error.stack) || (error && error.message) || error);
+      return;
+    }
+    if (!sc || typeof sc.follow !== 'function') {
+      state.error = 'sessionController.follow is unavailable';
+      return;
+    }
 
-      const original = sc.follow;
-      sc.follow = function follow(request, signal) {
+    const target = installTarget(sc);
+    if (target.__dshFastload) {
+      state.installed = true;
+      return;
+    }
+
+    const install = () => {
+      const original = target.follow;
+      const ownDescriptor = Object.getOwnPropertyDescriptor(target, 'follow');
+      // Another plugin can wrap us and keep calling the wrapper it captured. If
+      // teardown cannot restore target.follow, this flag turns the leftover
+      // wrapper into a passthrough instead of leaving the old page size in the
+      // chain and re-applying it after the next install.
+      let active = true;
+      const wrapped = function follow(request, signal) {
+        if (!active) return original.call(this, request, signal);
         const next = { ...request };
         const initial = isInitialPage(next, config);
 
@@ -109,8 +155,31 @@ export function apply(ctx) {
         return wrapFirstSnapshot(result, config, state, ctx);
       };
 
-      sc.__dshFastload = true;
+      target.follow = wrapped;
+      target.__dshFastload = true;
       state.installed = true;
+
+      return () => {
+        if (target.follow === wrapped) {
+          if (ownDescriptor) Object.defineProperty(target, 'follow', ownDescriptor);
+          else delete target.follow;
+        } else {
+          active = false;
+          state.error =
+            'sessionController.follow was re-wrapped by another plugin; the dsh-fastload wrapper was switched off and now passes requests through';
+        }
+        delete target.__dshFastload;
+        state.installed = false;
+      };
+    };
+
+    try {
+      if (typeof ctx.effect === 'function') {
+        ctx.effect(install, 'dsh-fastload: sessionController.follow');
+      } else {
+        // Hosts without ctx.effect: keep the pre-fix install-once behavior.
+        install();
+      }
     } catch (error) {
       state.error = String((error && error.stack) || (error && error.message) || error);
     }

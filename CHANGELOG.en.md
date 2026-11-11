@@ -7,7 +7,17 @@ All notable changes are documented here. Versions follow
 
 ## [Unreleased]
 
+- **No more stacking when another plugin keeps our wrapper.** If `follow` was wrapped again by another
+  plugin and the unload cannot restore it, the leftover wrapper now switches to a passthrough instead of
+  staying active; re-enabling installs one wrapper with the new config instead of keeping the old page size.
 - Adopt shared Codex PR review rules and repository-specific review guidance; preserve existing CI, human approval, and release behavior.
+
+### Fixed
+
+- Restore the host's `sessionController.follow` and clear the `__dshFastload`
+  marker when the plugin is disabled, unloaded, or reloaded. Re-enabling now
+  takes effect with the current config instead of leaving an orphaned wrapper
+  that keeps rewriting first pages while the reported state says it is off.
 
 ### Docs
 
