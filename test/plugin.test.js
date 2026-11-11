@@ -285,3 +285,29 @@ test('restores through cordis.original behind a traceable proxy', async () => {
     assert.equal(calls[0].maxMessages, 500);
   });
 });
+
+
+test('a wrapper another plugin holds is switched off instead of stacking', async () => {
+  const { ctx, sc, calls, dispose } = makeContext();
+  await withEnv({ DSH_FASTLOAD_ENABLED: '1', DSH_FASTLOAD_MAX_BYTES: '0', DSH_FASTLOAD_MAX_MESSAGES: '100' }, async () => {
+    apply(ctx);
+  });
+
+  // A plugin installed later wraps our function and keeps calling it, so the
+  // teardown below cannot restore target.follow. The leftover wrapper must not
+  // keep rewriting pages with the old maxMessages after the next install.
+  const ours = sc.follow;
+  sc.follow = async function* (request) {
+    yield* ours.call(sc, request);
+  };
+  dispose();
+
+  await withEnv({ DSH_FASTLOAD_ENABLED: '1', DSH_FASTLOAD_MAX_BYTES: '0', DSH_FASTLOAD_MAX_MESSAGES: '200' }, async () => {
+    apply(ctx);
+  });
+
+  await sc.follow({ maxMessages: 500 }).next();
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].maxMessages, 200, 'the re-enabled wrapper applies the new page size');
+  assert.equal(calls[0].turnWindow.minTurns, 2);
+});

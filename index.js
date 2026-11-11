@@ -132,7 +132,13 @@ export function apply(ctx) {
     const install = () => {
       const original = target.follow;
       const ownDescriptor = Object.getOwnPropertyDescriptor(target, 'follow');
+      // Another plugin can wrap us and keep calling the wrapper it captured. If
+      // teardown cannot restore target.follow, this flag turns the leftover
+      // wrapper into a passthrough instead of leaving the old page size in the
+      // chain and re-applying it after the next install.
+      let active = true;
       const wrapped = function follow(request, signal) {
+        if (!active) return original.call(this, request, signal);
         const next = { ...request };
         const initial = isInitialPage(next, config);
 
@@ -158,8 +164,9 @@ export function apply(ctx) {
           if (ownDescriptor) Object.defineProperty(target, 'follow', ownDescriptor);
           else delete target.follow;
         } else {
+          active = false;
           state.error =
-            'sessionController.follow was re-wrapped by another plugin; the dsh-fastload wrapper stays installed';
+            'sessionController.follow was re-wrapped by another plugin; the dsh-fastload wrapper was switched off and now passes requests through';
         }
         delete target.__dshFastload;
         state.installed = false;

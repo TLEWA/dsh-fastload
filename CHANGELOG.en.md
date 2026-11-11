@@ -7,6 +7,9 @@ All notable changes are documented here. Versions follow
 
 ## [Unreleased]
 
+- **No more stacking when another plugin keeps our wrapper.** If `follow` was wrapped again by another
+  plugin and the unload cannot restore it, the leftover wrapper now switches to a passthrough instead of
+  staying active; re-enabling installs one wrapper with the new config instead of keeping the old page size.
 - Adopt shared Codex PR review rules and repository-specific review guidance; preserve existing CI, human approval, and release behavior.
 
 ### Fixed
