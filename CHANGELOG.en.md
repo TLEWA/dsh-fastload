@@ -5,7 +5,7 @@ All notable changes are documented here. Versions follow
 
 [简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md)
 
-## [Unreleased]
+## [0.3.0] - 2026-11-11
 
 - **No more stacking when another plugin keeps our wrapper.** If `follow` was wrapped again by another
   plugin and the unload cannot restore it, the leftover wrapper now switches to a passthrough instead of
