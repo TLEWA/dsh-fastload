@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fsp from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import { apply } from '../index.js';
 
@@ -35,7 +38,7 @@ function makeContext(options = {}) {
   const ctx = {
     inject(names, callback) {
       assert.deepEqual(names, ['sessionController']);
-      callback({ get: (name) => (name === 'sessionController' ? sc : undefined) });
+      callback({ get: (name) => (name === 'sessionController' ? sc : options.services && options.services[name]) });
     },
     effect(execute) {
       const dispose = execute();
@@ -54,14 +57,14 @@ function makeContext(options = {}) {
   };
 }
 
-function withEnv(values, fn) {
+async function withEnv(values, fn) {
   const previous = {};
   for (const [key, value] of Object.entries(values)) {
     previous[key] = process.env[key];
     process.env[key] = value;
   }
   try {
-    return fn();
+    return await fn();
   } finally {
     for (const [key, value] of Object.entries(previous)) {
       if (value === undefined) delete process.env[key];
@@ -310,4 +313,140 @@ test('a wrapper another plugin holds is switched off instead of stacking', async
   assert.equal(calls.length, 1);
   assert.equal(calls[0].maxMessages, 200, 'the re-enabled wrapper applies the new page size');
   assert.equal(calls[0].turnWindow.minTurns, 2);
+});
+
+test('strips replay streams from the opening frame only', async () => {
+  await withEnv(
+    {
+      DSH_FASTLOAD_ENABLED: '1',
+      DSH_FASTLOAD_MAX_BYTES: '0',
+      DSH_FASTLOAD_FORCE: '0',
+      DSH_FASTLOAD_PAGE_CACHE: '0',
+      DSH_FASTLOAD_STRIP_STREAM: '1',
+    },
+    async () => {
+      const { ctx, sc } = makeContext();
+      const chunks = [{ type: 'chunk', chunk: { type: 'text-delta', text: 'x'.repeat(400) } }];
+      const page = {
+        type: 'snapshot',
+        cursor: 2,
+        hasMore: true,
+        records: [
+          rec(1, 'user/message', { message: { content: 'hi' } }),
+          { type: 'event', event: { seq: 2, type: 'assistant/message', data: { message: { content: 'ok' }, stream: chunks, usage: { outputTokens: 1 } } } },
+        ],
+      };
+      sc.follow = async function* () {
+        yield page;
+        yield { type: 'event', event: { seq: 3, type: 'assistant/message', data: { stream: chunks } } };
+      };
+      apply(ctx);
+
+      const stream = sc.follow({ maxMessages: 500 });
+      const first = await stream.next();
+      assert.deepEqual(first.value.records[1].event.data.stream, []);
+      assert.deepEqual(first.value.records[1].event.data.usage, { outputTokens: 1 });
+      assert.equal(page.records[1].event.data.stream.length, 1);
+
+      const second = await stream.next();
+      assert.equal(second.value.event.data.stream.length, 1);
+    }
+  );
+});
+
+test('serves a cached opening and swallows the duplicate live opening', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-plugin-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_FORCE: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_DEBUG: '0',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+  };
+  const page = () => ({
+    type: 'snapshot',
+    cursor: 3,
+    hasMore: true,
+    assistantStream: { revision: 0 },
+    records: [rec(1, 'turn/start'), rec(2, 'user/message', { message: { content: 'q' } }), rec(3, 'assistant/message', { message: { content: 'a' } })],
+  });
+
+  try {
+    await withEnv(env, async () => {
+      const first = makeContext({ services: { sessionPersistence: persistence } });
+      first.sc.follow = async function* (request) {
+        this.calls.push(request);
+        yield page();
+      };
+      apply(first.ctx);
+      const stream = first.sc.follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-test' } });
+      await stream.next();
+      const cache = globalThis.__DSH_FASTLOAD__.pageCache;
+      assert.equal(cache.enabled, true);
+      await cache.flush();
+      assert.ok(cache.stats.writes >= 1);
+      first.dispose();
+
+      const second = makeContext({ services: { sessionPersistence: persistence } });
+      let builds = 0;
+      second.sc.follow = async function* (request) {
+        builds += 1;
+        this.calls.push(request);
+        yield page();
+      };
+      apply(second.ctx);
+      const replay = second.sc.follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-test' } });
+      const cached = await replay.next();
+      assert.equal(cached.value.type, 'snapshot');
+      assert.deepEqual(cached.value.records, page().records);
+      const after = await replay.next();
+      assert.equal(after.done, true);
+      assert.equal(builds, 1);
+      assert.equal(globalThis.__DSH_FASTLOAD__.pageCacheHits >= 1, true);
+      second.dispose();
+    });
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('replays events appended after the cached cursor', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-plugin-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_FORCE: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_DEBUG: '0',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+  };
+  const base = { type: 'snapshot', cursor: 2, hasMore: true, assistantStream: { revision: 0 }, records: [rec(1, 'turn/start'), rec(2, 'user/message')] };
+  try {
+    await withEnv(env, async () => {
+      const first = makeContext({ services: { sessionPersistence: persistence } });
+      first.sc.follow = async function* () { yield base; };
+      apply(first.ctx);
+      await first.sc.follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-test' } }).next();
+      await globalThis.__DSH_FASTLOAD__.pageCache.flush();
+      first.dispose();
+
+      const second = makeContext({ services: { sessionPersistence: persistence } });
+      second.sc.follow = async function* () {
+        yield { ...base, cursor: 3, records: [...base.records, rec(3, 'assistant/message')] };
+      };
+      apply(second.ctx);
+      const stream = second.sc.follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-test' } });
+      const firstFrame = await stream.next();
+      assert.equal(firstFrame.value.cursor, 2);
+      const replay = await stream.next();
+      assert.equal(replay.value.type, 'event');
+      assert.equal(replay.value.event.seq, 3);
+      second.dispose();
+    });
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
 });

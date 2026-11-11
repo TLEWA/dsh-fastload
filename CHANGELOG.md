@@ -5,6 +5,32 @@
 
 [简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md)
 
+## [Unreleased]
+
+### 新增
+
+- **会话头索引（P4）。** 宿主包装 `sessionPersistence.readGenerationHeader`，按文件
+  `size + mtime` 复用已解析的 zstd 首行，并把一次启动内的重复 `list` 合成一次；索引落盘到
+  `<cacheDir>/scan-headers.json`（1.5 秒防抖、原子替换、两万条按 mtime 裁剪）。
+  `session/list` 构建从 238.7 ms 降到 82.0 ms（有索引首调），TTL 命中 1.1–1.8 ms。
+- **首屏快照缓存（P5）。** 初始页按“协议版本 + sessionId + persistence revision + 页窗口/裁剪配置”
+  落盘为 zstd（无 zstd 回退 gzip）。命中先发缓存页，真实 `follow` 在后台构建并只补发
+  `seq > cursor` 的事件；cursor 或 `assistantStream.revision` 不一致就丢弃缓存，绝不下发
+  第二个 snapshot。缓存页读取 16.9–17.7 ms，同一进程冷建页 583.5 ms。
+- **首帧 replay stream 剥离（P8 的一部分）。** `assistant/message.data.stream` 替换为 `[]`，
+  页面 2,821,398 → 1,562,989 字节（−44.6%），可见文本逐字相同。
+- 新增独立开关 `DSH_FASTLOAD_SCAN_CACHE`、`DSH_FASTLOAD_PAGE_CACHE`、
+  `DSH_FASTLOAD_PAGE_CACHE_BYTES`、`DSH_FASTLOAD_PAGE_CACHE_FILES`、
+  `DSH_FASTLOAD_CACHE_DIR`、`DSH_FASTLOAD_STRIP_STREAM`；任何异常静默回退到原始路径。
+- 新增 `docs/research/dsh-first-open-p1-p8-assessment.md`：P1–P8 逐项核实、实测数据、
+  未实施项的原因与上游改造方案。
+
+### 测试
+
+- 新增 `test/compact.test.js`、`test/page-cache.test.js`、`test/scan-cache.test.js`，
+  以及三个客户端流集成用例（只剥离首帧、缓存命中吞掉重复 opening、cursor 追平）；
+  `npm test` 共 36 项。
+
 ## [0.3.0] - 2026-11-11
 
 - **别的插件保留包装时不再叠加。** 卸载时如果 `follow` 已被另一个插件再包一层、无法覆盖回去，旧包装会

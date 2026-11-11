@@ -5,6 +5,35 @@ All notable changes are documented here. Versions follow
 
 [简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md)
 
+## [Unreleased]
+
+### Added
+
+- **Session-header index (P4).** The host wraps `sessionPersistence.readGenerationHeader` and reuses
+  the decoded zstd first line per file `size + mtime`, coalescing repeated `list` calls within one
+  boot. The index is stored in `<cacheDir>/scan-headers.json` (1.5 s debounce, atomic replace,
+  20k entries trimmed by mtime). Building `session/list` drops from 238.7 ms to 82.0 ms (first
+  indexed call) and 1.1–1.8 ms on a TTL hit.
+- **Opening-page cache (P5).** An initial page is stored as zstd (gzip fallback) under
+  "protocol version + sessionId + persistence revision + page window/trim config". On a hit the
+  cached page is sent first while the real `follow` builds in the background and only forwards
+  events with `seq > cursor`; if the cursor or `assistantStream.revision` disagrees the cache is
+  dropped and a second snapshot is never emitted. A cached page reads in 16.9–17.7 ms versus a
+  583.5 ms cold build in the same process.
+- **Replay-stream strip on the first frame (part of P8).** `assistant/message.data.stream` becomes
+  `[]`, taking the page from 2,821,398 to 1,562,989 bytes (−44.6%) with byte-identical visible text.
+- New independent switches `DSH_FASTLOAD_SCAN_CACHE`, `DSH_FASTLOAD_PAGE_CACHE`,
+  `DSH_FASTLOAD_PAGE_CACHE_BYTES`, `DSH_FASTLOAD_PAGE_CACHE_FILES`, `DSH_FASTLOAD_CACHE_DIR`
+  and `DSH_FASTLOAD_STRIP_STREAM`; any error falls back silently to the original path.
+- Add `docs/research/dsh-first-open-p1-p8-assessment.md`: the per-item P1–P8 assessment,
+  measurements, reasons for items not implemented and upstream proposals.
+
+### Tests
+
+- Add `test/compact.test.js`, `test/page-cache.test.js` and `test/scan-cache.test.js`, plus three
+  client-stream integration cases (strip the first frame only, swallow a duplicate opening on a
+  cache hit, replay events past the cached cursor). `npm test` now runs 36 tests.
+
 ## [0.3.0] - 2026-11-11
 
 - **No more stacking when another plugin keeps our wrapper.** If `follow` was wrapped again by another

@@ -6,6 +6,12 @@ export const DEFAULTS = Object.freeze({
   minTurns: 2,
   maxBytes: 0,
   hardCapBytes: 8 * 1024 * 1024,
+  scanCache: true,
+  stripStream: true,
+  pageCache: true,
+  pageCacheMaxBytes: 96 * 1024 * 1024,
+  pageCacheMaxFiles: 400,
+  cacheDir: '',
   debug: false,
 });
 
@@ -45,6 +51,18 @@ export function readConfig(env = process.env) {
       256 * 1024,
       64 * 1024 * 1024
     ),
+    scanCache: readBool(env, 'DSH_FASTLOAD_SCAN_CACHE', DEFAULTS.scanCache),
+    stripStream: readBool(env, 'DSH_FASTLOAD_STRIP_STREAM', DEFAULTS.stripStream),
+    pageCache: readBool(env, 'DSH_FASTLOAD_PAGE_CACHE', DEFAULTS.pageCache),
+    pageCacheMaxBytes: readInt(
+      env,
+      'DSH_FASTLOAD_PAGE_CACHE_BYTES',
+      DEFAULTS.pageCacheMaxBytes,
+      1024 * 1024,
+      2 * 1024 * 1024 * 1024
+    ),
+    pageCacheMaxFiles: readInt(env, 'DSH_FASTLOAD_PAGE_CACHE_FILES', DEFAULTS.pageCacheMaxFiles, 1, 10_000),
+    cacheDir: env.DSH_FASTLOAD_CACHE_DIR && env.DSH_FASTLOAD_CACHE_DIR.trim() !== '' ? env.DSH_FASTLOAD_CACHE_DIR.trim() : DEFAULTS.cacheDir,
     debug: readBool(env, 'DSH_FASTLOAD_DEBUG', DEFAULTS.debug),
   };
 }
