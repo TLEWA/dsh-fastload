@@ -9,6 +9,13 @@ All notable changes are documented here. Versions follow
 
 - Adopt shared Codex PR review rules and repository-specific review guidance; preserve existing CI, human approval, and release behavior.
 
+### Fixed
+
+- Restore the host's `sessionController.follow` and clear the `__dshFastload`
+  marker when the plugin is disabled, unloaded, or reloaded. Re-enabling now
+  takes effect with the current config instead of leaving an orphaned wrapper
+  that keeps rewriting first pages while the reported state says it is off.
+
 ### Docs
 
 - The changelog now follows the other plugins' layout: `CHANGELOG.md` is the Chinese primary document and the English edition moved to `CHANGELOG.en.md`; synced the release manifest in `ci.config.json` and `package.json`.

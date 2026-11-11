@@ -39,7 +39,10 @@ client session open
 5. If protected turns exceed the soft budget but fit the hard cap, they are kept.
 6. If they exceed the hard cap, the page is returned unchanged.
 7. The plugin is idempotent: `sessionController.follow` is marked with
-   `__dshFastload` and never wrapped twice.
+   `__dshFastload` and never wrapped twice. The marker and the wrapper live on
+   the raw service behind cordis's traceable proxy and are removed through
+   `ctx.effect`'s disposer when the plugin is disabled, unloaded, or reloaded;
+   re-enabling installs a fresh wrapper with the current config.
 8. The client fill only acts when `scrollHeight <= clientHeight` (plus a
    small slack), only on the transcript flow that owns
    `data-slot="conversation.chat.flow"`, and only once per mounted flow.

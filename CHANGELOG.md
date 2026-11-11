@@ -9,6 +9,12 @@
 
 - 接入 Codex PR 公共审阅规则与本仓重点，保留现有 CI、人工批准和发布行为。
 
+### 修复
+
+- 禁用、卸载或热重载插件时还原宿主 `sessionController.follow` 并清除
+  `__dshFastload` 标记；重新启用后立即按当前配置生效，不再出现状态显示未安装、
+  旧包装却仍在改写首屏的情况。
+
 ### 文档
 
 - 更新日志改为与其他插件一致的布局：`CHANGELOG.md` 为中文主文档，英文版迁移到 `CHANGELOG.en.md`；同步 `ci.config.json` 与 `package.json` 的发布清单。

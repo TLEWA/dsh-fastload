@@ -22,6 +22,8 @@ firstAnchor 看起来很快，实际上是一个空页。
 - 调用方显式要求更小的首屏时尊重原值；`DSH_FASTLOAD_FORCE=1` 可强制改写。
 - 可选 `maxBytes` 只在 `turn/start` 边界裁切，始终保留最新 `minTurns` 个完整
   turn；如果这两个 turn 超过软预算但不超过硬上限，就保留它们，不切进 turn 内部。
+- 禁用、卸载或热重载插件会还原 `sessionController.follow` 并清除 `__dshFastload`
+  标记；重新启用后按当前配置重新包装，不会沿用旧配置。
 - 后台补齐：首帧渲染后，Web 客户端等一个短暂的输入空闲窗口；如果 transcript
   不可滚动（`scrollHeight <= clientHeight`），就自动点一次内置“加载更早”。
   这条路径走 `ChatNavigation.loadEarlier()`，会保留视口锚点，使尾部上下文与
@@ -103,7 +105,7 @@ npm test
 - **[dsh-opencode-go-router](https://github.com/TLEWA/dsh-opencode-go-router)** —— 上下文折叠或系统提示被重写后轮换 OpenCode Go 路由，少丢一点提示缓存。
 - **[dsh-sidebar-organizer](https://github.com/TLEWA/dsh-sidebar-organizer)** —— 七区域布局整理器：侧栏、侧栏底部、对话标签、输入框、会话头部、右侧栏、设置导航都能长按拖拽排序，面板可以收进「更多」再拖回来。
 - **[dsh-sidebar-row-menu](https://github.com/TLEWA/dsh-sidebar-row-menu)** —— 侧栏行右键菜单：工作区行、会话行与会话正文各有自己的右键菜单，含「打开方式」「更多操作」二级菜单。
-- **[dsh-utf8-output](https://github.com/TLEWA/dsh-utf8-output)** —— 修复 Windows 下 DSH 子进程 GBK/CP936/CP932 输出乱码。
+- **[dsh-utf8-output](https://github.com/TLEWA/dsh-utf8-output)** —— 修复 Windows 下 DSH 子进程 GBK/CP936/GB18030 输出乱码。
 - **[dsh-ptc-noargs](https://github.com/TLEWA/dsh-ptc-noargs)** —— 修复 PTC `run_code` 中无参工具调用被拒绝的问题：把省略或 `undefined` 的首参归一化为 `{}`。
 
 ## 许可证
