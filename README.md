@@ -29,10 +29,16 @@ firstAnchor 看起来很快，实际上是一个空页。
   turn；如果这两个 turn 超过软预算但不超过硬上限，就保留它们，不切进 turn 内部。
 - 禁用、卸载或热重载插件会还原 `sessionController.follow` 并清除 `__dshFastload`
   标记；重新启用后按当前配置重新包装，不会沿用旧配置。
+- 空白自愈：Web 端发现“有页、有加载更早按钮、正文 0 行”且窗口里存在
+  `/rewind` 命令时，直接用内置“加载更早”往回补一页（保留锚点，最多 4 次、
+  间隔 ≥700ms），而不是重建视图；重建对 rewind 隐藏的内容无效。
 - 后台补齐：首帧渲染后，Web 客户端等一个短暂的输入空闲窗口；如果 transcript
   不可滚动（`scrollHeight <= clientHeight`），就自动点一次内置“加载更早”。
   这条路径走 `ChatNavigation.loadEarlier()`，会保留视口锚点，使尾部上下文与
   stock 500/50/2 一致。如果首屏本身已经可滚动，则不动作：最新内容已经在底部。
+- rewind 感知首屏：初始页里出现完整的 `/rewind` 命令对时，若该页的可见
+  消息被 rewind 插件的裁剪区间全部隐藏，就把页起点向前扩一页（只补一次），
+  让第一次派发就带可见内容。正常会话不触发，零额外开销。
 - 会话头索引：`session/list` 对未变化的会话文件直接复用上次解析出的 header，
   并把一次启动内的重复列表请求合成一次；索引写入 1.5 秒防抖、原子替换，
   文件大小或 mtime 变了自然失效。
@@ -66,6 +72,8 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_SCAN_CACHE` | `1` | 会话头索引与列表 TTL memo；`0` 恢复每次全量读 header。 |
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | 首帧剥离回放用的 `data.stream`。 |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | 持久化首屏快照。 |
+| `DSH_FASTLOAD_REWIND_AWARE` | `1` | 初始页被 `/rewind` 全部隐藏时向前扩一页。 |
+| `DSH_FASTLOAD_SERVE_LOG` | `1` | 在缓存目录写 `serve.log`（每次 follow 一行，512 KiB 轮转）。 |
 | `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | 页缓存总量上限（96 MiB，下限 1 MiB）。 |
 | `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | 页缓存文件数上限。 |
 | `DSH_FASTLOAD_CACHE_DIR` | 空 | 缓存目录；空表示 `$DSH_HOME/cache/dsh-fastload`。 |

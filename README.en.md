@@ -34,12 +34,20 @@ the log files themselves are never modified.
 - Optional `maxBytes` trims only at `turn/start` boundaries. It always keeps
   the newest `minTurns` complete turns; if those protected turns exceed the
   soft budget but fit the hard cap, they are kept instead of cutting into a turn.
+- Blank self-heal: when the web client sees a page, a "Load older" button and
+  zero rows while the window contains `/rewind` commands, it pages backwards
+  with the built-in button (anchor preserved, at most 4 times, ≥700 ms apart)
+  instead of rebuilding the view; a rebuild cannot un-hide rewound content.
 - Background fill: after the first paint, the web client waits for a short idle
   window. If the transcript does not scroll (`scrollHeight <= clientHeight`),
   it presses the built-in "Load older" button once. That runs
   `ChatNavigation.loadEarlier()`, so the viewport anchor is preserved and the
   tail context becomes the same as stock 500/50/2. If the first page already
   scrolls, it does nothing: the newest content is already at the bottom.
+- Rewind-aware first page: when the initial page contains a complete `/rewind`
+  pair and every message in it is hidden by the rewind plugin's cut ranges, one
+  more page is prepended (at most once) so the very first dispatch already
+  carries visible content. Sessions without rewinds pay nothing.
 - Header index: `session/list` reuses the previously decoded header for session
   files whose size and mtime did not change, and coalesces repeated list requests
   within one boot. The index is written with a 1.5 s debounce and an atomic
@@ -79,6 +87,8 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_SCAN_CACHE` | `1` | Session-header index and list TTL memo; `0` re-reads every header. |
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | Strip replay `data.stream` from the first frame. |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | Persist the opening page. |
+| `DSH_FASTLOAD_REWIND_AWARE` | `1` | Prepend one page when rewinds hide the whole initial page. |
+| `DSH_FASTLOAD_SERVE_LOG` | `1` | Write `serve.log` in the cache directory (one line per follow, 512 KiB rotation). |
 | `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | Total cache budget (96 MiB; minimum 1 MiB). |
 | `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | Maximum cached page files. |
 | `DSH_FASTLOAD_CACHE_DIR` | empty | Cache directory; empty means `$DSH_HOME/cache/dsh-fastload`. |

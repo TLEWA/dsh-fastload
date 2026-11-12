@@ -20,6 +20,8 @@ import { planTrim } from './src/trim.js';
 import { planCompact } from './src/compact.js';
 import { installScanCache } from './src/scan-cache.js';
 import { createPageCache } from './src/page-cache.js';
+import { createServeLog } from './src/serve-log.js';
+import { findRewindCuts, earliestCut, firstSeqOf, hiddenByCuts } from './src/rewind.js';
 
 export const name = 'dsh-fastload';
 export const inject = ['sessionController'];
@@ -87,7 +89,7 @@ function observeFirstFrame(result, startedAt) {
  * ends the stream rather than emitting a second opening frame.
  */
 function wrapPageCache(result, options) {
-  const { cache, sessionId, variant, config, state } = options;
+  const { cache, sessionId, variant, config, state, log } = options;
   if (!result || typeof result[Symbol.asyncIterator] !== 'function') return result;
 
   return (async function* () {
@@ -105,6 +107,10 @@ function wrapPageCache(result, options) {
     if (cached) {
       served = true;
       state.pageCacheHits += 1;
+      log?.write(
+        'hit sid=' + sessionId + ' cursor=' + cachedCursor + ' records=' +
+          (Array.isArray(cached.records) ? cached.records.length : -1) + ' hasMore=' + cached.hasMore
+      );
       if (config.debug) {
         const totalMs = Number(process.hrtime.bigint() - pullAt) / 1e6;
         process.stderr.write('[fl] page cache ready ' + totalMs.toFixed(1) + 'ms\n');
@@ -130,17 +136,26 @@ function wrapPageCache(result, options) {
         if (first) {
           first = false;
           if (frame && frame.type === 'snapshot') {
+            log?.write(
+              'live sid=' + sessionId + ' records=' +
+                (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor +
+                ' hasMore=' + frame.hasMore + ' rev=' +
+                (frame.assistantStream ? frame.assistantStream.revision : '-')
+            );
             if (served) {
               const realCursor = Number.isFinite(frame.cursor) ? frame.cursor : null;
               const realRevision = frame.assistantStream ? frame.assistantStream.revision : undefined;
               const sameBaseline = realRevision === cachedRevision;
               if (sameBaseline && realCursor !== null && cachedCursor !== null && realCursor >= cachedCursor) {
+                let replayed = 0;
                 for (const record of frame.records || []) {
                   const event = record && record.event;
                   if (event && Number.isFinite(event.seq) && event.seq > cachedCursor) {
+                    replayed += 1;
                     yield { type: 'event', event };
                   }
                 }
+                log?.write('replay sid=' + sessionId + ' events=' + replayed + ' from=' + cachedCursor);
                 continue;
               }
               // The live page disagrees with the cached one (or the assistant
@@ -148,12 +163,22 @@ function wrapPageCache(result, options) {
               // of emitting a second opening frame.
               cache.evict(probe.key);
               state.pageCacheDropped += 1;
+              log?.write(
+                'drop sid=' + sessionId + ' live=' + realCursor + ' cached=' + cachedCursor +
+                  ' baseline=' + realRevision + '/' + cachedRevision
+              );
               if (config.debug) {
                 process.stderr.write('[fl] page cache dropped cursor=' + realCursor + ' cached=' + cachedCursor + ' baseline=' + realRevision + '/' + cachedRevision + '\n');
               }
               return;
             }
-            if (probe && probe.revision) cache.store(sessionId, probe.revision, probe.key, frame);
+            if (probe && probe.revision) {
+              cache.store(sessionId, probe.revision, probe.key, frame);
+              log?.write(
+                'store sid=' + sessionId + ' records=' +
+                  (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor
+              );
+            }
           }
         }
 
@@ -167,7 +192,86 @@ function wrapPageCache(result, options) {
   })();
 }
 
-function wrapFirstSnapshot(result, config, state, ctx) {
+/**
+ * A tail-only page can land entirely inside a `/rewind` cut, which renders as
+ * an empty transcript with a "load older" button. One page further back is
+ * enough: the same request without the newest window, merged in front of the
+ * page we already have. Only runs when the page itself proves it is cut.
+ */
+async function extendRewoundPage(opening, extension) {
+  const { original, thisArg, request, signal, state, log } = extension;
+  if (!opening || opening.type !== 'snapshot' || !Array.isArray(opening.records) || opening.records.length === 0) {
+    return opening;
+  }
+  const cuts = findRewindCuts(opening.records);
+  const target = earliestCut(cuts);
+  if (target === null) return opening;
+  // The page can start before the cut and still render nothing: what matters
+  // is whether any message row survives the cuts, not where the page begins.
+  let visible = 0;
+  for (const record of opening.records) {
+    const event = record && record.event ? record.event : record;
+    if (!event) continue;
+    if (event.type !== 'user/message' && event.type !== 'assistant/message') continue;
+    if (!hiddenByCuts(event.seq, cuts)) { visible += 1; if (visible > 0) break; }
+  }
+  if (visible > 0) return opening;
+  const first = firstSeqOf(opening.records);
+  const before = first === null ? 0 : first;
+  if (before <= 0) return opening;
+  log?.write('extend-try first=' + first + ' target=' + target + ' records=' + opening.records.length);
+
+  let previous = null;
+  try {
+    const stream = original.call(thisArg, {
+      ...request,
+      beforeSeq: before,
+      maxMessages: Number.isFinite(request.maxMessages) ? request.maxMessages : 50,
+    }, signal);
+    const iterator = stream[Symbol.asyncIterator]();
+    const step = await iterator.next();
+    previous = step && !step.done ? step.value : null;
+    try {
+      await iterator.return?.();
+    } catch {}
+  } catch (error) {
+    previous = null;
+    log?.write('extend-failed ' + String((error && error.message) || error));
+  }
+
+  if (!previous || previous.type !== 'snapshot' || !Array.isArray(previous.records) || previous.records.length === 0) {
+    log?.write('extend-skip prev=' + (previous && previous.type ? previous.type : 'none'));
+    return opening;
+  }
+
+  // The client rejects a page whose own entries are not consecutive, so the
+  // join has to be exact: drop the overlap and refuse anything with a hole.
+  const kept = previous.records.filter((record) => {
+    const seq = record && record.event ? record.event.seq : record && record.seq;
+    return !Number.isFinite(seq) || seq < first;
+  });
+  let previousLast = null;
+  for (let index = kept.length - 1; index >= 0; index -= 1) {
+    const seq = kept[index] && kept[index].event ? kept[index].event.seq : null;
+    if (Number.isFinite(seq)) { previousLast = seq; break; }
+  }
+  if (previousLast === null || previousLast + 1 !== first) {
+    log?.write('extend-skip gap prevLast=' + previousLast + ' first=' + first);
+    return opening;
+  }
+  state.rewindExtends += 1;
+  log?.write(
+    'extend records=' + kept.length + '+' + opening.records.length +
+      ' target=' + target + ' first=' + first + ' prevLast=' + previousLast
+  );
+  return {
+    ...opening,
+    records: [...kept, ...opening.records],
+    hasMore: previous.hasMore,
+  };
+}
+
+function wrapFirstSnapshot(result, config, state, ctx, extension) {
   const trimFrame = (frame) => {
     const compacted = planCompact(frame, config);
     if (compacted.info) {
@@ -198,8 +302,13 @@ function wrapFirstSnapshot(result, config, state, ctx) {
     return opening;
   };
 
+  const prepare = async (frame) => {
+    const extended = extension ? await extendRewoundPage(frame, extension) : frame;
+    return trimFrame(extended);
+  };
+
   if (result && typeof result.then === 'function') {
-    return result.then(trimFrame);
+    return result.then(prepare);
   }
 
   if (result && typeof result[Symbol.asyncIterator] === 'function') {
@@ -208,7 +317,7 @@ function wrapFirstSnapshot(result, config, state, ctx) {
       for await (const frame of result) {
         if (first) {
           first = false;
-          yield trimFrame(frame);
+          yield await prepare(frame);
         } else {
           yield frame;
         }
@@ -242,6 +351,7 @@ function reuseState() {
     lastCompact: null,
     pageCacheHits: 0,
     pageCacheDropped: 0,
+    rewindExtends: 0,
     error: null,
   };
   globalThis.__DSH_FASTLOAD__ = state;
@@ -272,6 +382,7 @@ export function apply(ctx) {
     ', maxBytes=' + config.maxBytes +
     ', client auto-fill=on, scan cache=' + (config.scanCache ? 'on' : 'off') +
     ', page cache=' + (config.pageCache ? 'on' : 'off') +
+    ', rewind=' + (config.rewindAware ? 'aware' : 'plain') +
     ', replay streams=' + (config.stripStream ? 'stripped' : 'kept');
   try {
     ctx.logger?.info?.(banner);
@@ -292,6 +403,18 @@ export function apply(ctx) {
     }
 
     const target = installTarget(sc);
+
+    // Diagnostics: one line per follow decision so an empty transcript can be
+    // traced to the page that was (or was not) served for it.
+    let serveLog = null;
+    if (config.serveLog) {
+      try {
+        serveLog = createServeLog(resolveCacheDir(config));
+        state.serveLog = serveLog.file;
+      } catch (error) {
+        if (config.debug) process.stderr.write('[fl] serve log error: ' + error + '\n');
+      }
+    }
 
     // P5: persisted opening page, keyed by the persistence revision so it can
     // only ever serve the exact log it was built from.
@@ -379,9 +502,28 @@ export function apply(ctx) {
         const startedAt = config.debug ? process.hrtime.bigint() : 0n;
         const result = original.call(this, next, signal);
         const wantTrim = config.maxBytes > 0 || config.stripStream;
-        const trimmed = initial && wantTrim ? wrapFirstSnapshot(result, config, state, ctx) : result;
+        // `next` already carries the narrowed window, so reuse the decision
+        // made against the original request instead of re-testing it here.
+        const wantExtend = config.rewindAware && initial;
+        const extension = wantExtend
+          ? { original, thisArg: this, request: next, signal, state, log: serveLog }
+          : null;
+        const trimmed = initial && (wantTrim || wantExtend)
+          ? wrapFirstSnapshot(result, config, state, ctx, extension)
+          : result;
         const streamed = config.debug ? observeFirstFrame(trimmed, startedAt) : trimmed;
         const sessionId = initial ? sessionIdOf(next) : null;
+        if (serveLog) {
+          try {
+            serveLog.write(
+              'open sid=' + (sessionIdOf(next) ?? '-') + ' initial=' + initial +
+                ' before=' + (next.beforeSeq ?? '-') + ' through=' + (next.throughSeq ?? '-') +
+                ' max=' + (next.maxMessages ?? '-') + ' turns=' +
+                (next.turnWindow ? next.turnWindow.minMessages + '/' + next.turnWindow.minTurns : '-') +
+                ' stream=' + (next.assistantStream === true ? 'on' : 'off')
+            );
+          } catch {}
+        }
         if (!initial || !pageCache || !sessionId) return streamed;
         return wrapPageCache(streamed, {
           cache: pageCache,
@@ -389,6 +531,7 @@ export function apply(ctx) {
           variant: pageVariant(next, config),
           config,
           state,
+          log: serveLog,
         });
       };
 

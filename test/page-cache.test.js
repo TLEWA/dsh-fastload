@@ -15,7 +15,7 @@ function fakePersistence(initial = 'rev-1') {
   };
 }
 
-function page(records = 1, cursor = 7) {
+function page(records = 1, cursor = records) {
   const list = [];
   for (let seq = 1; seq <= records; seq += 1) list.push({ type: 'event', event: { seq, type: 'user/message' } });
   return { type: 'snapshot', cursor, hasMore: true, records: list, assistantStream: { revision: 0 } };
@@ -81,6 +81,33 @@ test('corrupt cache files are dropped and counted', async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     await assert.rejects(fs.stat(file));
     void dir;
+  });
+});
+
+test('an empty or misaligned opening is never served', async () => {
+  await withCache(async ({ cache }) => {
+    const probe = await cache.lookup('s1', 'v1');
+
+    cache.store('s1', probe.revision, probe.key, { type: 'snapshot', cursor: 4, hasMore: true, records: [] });
+    await cache.flush();
+    assert.equal((await cache.lookup('s1', 'v1')).hit, false);
+    assert.equal(cache.stats.invalid, 1);
+
+    cache.store('s1', probe.revision, probe.key, page(3, 9));
+    await cache.flush();
+    assert.equal((await cache.lookup('s1', 'v1')).hit, false);
+    assert.equal(cache.stats.invalid, 2);
+
+    cache.store('s1', probe.revision, probe.key, { type: 'delta', cursor: 3, hasMore: true, records: page(3).records });
+    await cache.flush();
+    assert.equal((await cache.lookup('s1', 'v1')).hit, false);
+    assert.equal(cache.stats.invalid, 3);
+
+    cache.store('s1', probe.revision, probe.key, page(3));
+    await cache.flush();
+    const hit = await cache.lookup('s1', 'v1');
+    assert.equal(hit.hit, true);
+    assert.equal(hit.opening.records.length, 3);
   });
 });
 

@@ -28,6 +28,29 @@ All notable changes are documented here. Versions follow
 - Add `docs/research/dsh-first-open-p1-p8-assessment.md`: the per-item P1–P8 assessment,
   measurements, reasons for items not implemented and upstream proposals.
 
+### Fixed
+
+- **Blank first screen in rewound sessions.** When the initial page fell
+  entirely inside `dsh-rewind-plugin` cut ranges, every node was marked
+  hidden and only the "Load older" pill remained. The host now detects the
+  `/rewind` pairs in the initial page and, when no message is visible,
+  prepends one more page before dispatch (`DSH_FASTLOAD_REWIND_AWARE`, on by
+  default: a single attempt, contiguous pages only). The web client likewise
+  pages backwards with the built-in button instead of rebuilding the view,
+  because a rebuild cannot un-hide rewound content. Bench first row went from
+  1,556/1,001/916 ms (one extra click) to 813/747/783 ms (none).
+- The opening-page cache now validates every entry (non-empty `snapshot`,
+  last `seq` equal to the cursor) and drops the file otherwise, so a bad page
+  can never be served.
+- The web client adds blank diagnostics and self-heal: it records the installed
+  window, errors and a sample timeline, and on "page + button + zero rows" it
+  tries one more page before falling back to a rebuild. Automatic
+  `location.reload()` is gone, so a deterministic case cannot cause a refresh
+  loop. Instrumentation is off unless `localStorage['dsh-fastload.debug']='1'`.
+- New `<cacheDir>/serve.log` (`DSH_FASTLOAD_SERVE_LOG`): one line per follow
+  with `sid/initial/before/through/max/turns` plus cache hit, extension and
+  page-write results, for offline forensics.
+
 ### Tests
 
 - Add `test/compact.test.js`, `test/page-cache.test.js` and `test/scan-cache.test.js`, plus three

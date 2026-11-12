@@ -9,10 +9,12 @@ export const DEFAULTS = Object.freeze({
   scanCache: true,
   stripStream: true,
   pageCache: true,
+  rewindAware: true,
   pageCacheMaxBytes: 96 * 1024 * 1024,
   pageCacheMaxFiles: 400,
   cacheDir: '',
   debug: false,
+  serveLog: true,
 });
 
 function readInt(env, name, fallback, min, max) {
@@ -64,5 +66,7 @@ export function readConfig(env = process.env) {
     pageCacheMaxFiles: readInt(env, 'DSH_FASTLOAD_PAGE_CACHE_FILES', DEFAULTS.pageCacheMaxFiles, 1, 10_000),
     cacheDir: env.DSH_FASTLOAD_CACHE_DIR && env.DSH_FASTLOAD_CACHE_DIR.trim() !== '' ? env.DSH_FASTLOAD_CACHE_DIR.trim() : DEFAULTS.cacheDir,
     debug: readBool(env, 'DSH_FASTLOAD_DEBUG', DEFAULTS.debug),
+    serveLog: readBool(env, 'DSH_FASTLOAD_SERVE_LOG', DEFAULTS.serveLog),
+    rewindAware: readBool(env, 'DSH_FASTLOAD_REWIND_AWARE', DEFAULTS.rewindAware),
   };
 }

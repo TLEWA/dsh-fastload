@@ -81,6 +81,25 @@ export function createPageCache(options) {
     return [path.join(root, key + '.json.zst'), path.join(root, key + '.json.gz')];
   }
 
+  /**
+   * A cached page is only reusable when it is a complete opening snapshot whose
+   * tail record still sits on the stored cursor. An entry that carries no
+   * records, or whose records no longer end where the cursor says, would make
+   * the client install an empty window; treat it as a miss and rebuild.
+   * @param {object} opening stored opening snapshot
+   * @returns {boolean}
+   */
+  function usableOpening(opening) {
+    if (!opening || opening.type !== 'snapshot' || !Array.isArray(opening.records)) return false;
+    if (opening.records.length === 0) return false;
+    const tail = opening.records[opening.records.length - 1];
+    const event = tail && typeof tail === 'object' ? (tail.type === 'event' ? tail.event : tail) : null;
+    const tailSeq = event && typeof event.seq === 'number' ? event.seq : null;
+    if (tailSeq === null) return false;
+    if (Number.isFinite(opening.cursor) && tailSeq !== opening.cursor) return false;
+    return true;
+  }
+
   async function readEntry(file) {
     const base = file.endsWith('.zst') ? '.zst' : '.gz';
     const data = await fsp.readFile(file);
@@ -130,6 +149,12 @@ export function createPageCache(options) {
       if (!entry || entry.v !== ENVELOPE_VERSION || entry.sid !== sessionId || String(entry.rev) !== String(revision) || entry.key !== key || !entry.opening || typeof entry.opening !== 'object') {
         stats.invalid += 1;
         if (file !== undefined) void fsp.rm(file, { force: true }).catch(() => {});
+        return { hit: false, revision, key };
+      }
+      if (!usableOpening(entry.opening)) {
+        stats.invalid += 1;
+        if (file !== undefined) void fsp.rm(file, { force: true }).catch(() => {});
+        if (debug) process.stderr.write('[fl] page cache unusable opening, rebuilding\n');
         return { hit: false, revision, key };
       }
       stats.hits += 1;
