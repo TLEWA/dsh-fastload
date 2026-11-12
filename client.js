@@ -1180,7 +1180,8 @@ const DEBUG = (() => {
                 sessionStorage.setItem('dsh-fastload:blank', JSON.stringify(payload).slice(0, 60000));
               } catch {}
               try {
-                copy(JSON.stringify(payload)); // eslint-disable-line no-undef
+                const clipboardCopy = globalThis.copy;
+                if (typeof clipboardCopy === 'function') clipboardCopy(JSON.stringify(payload));
               } catch {}
             };
 
