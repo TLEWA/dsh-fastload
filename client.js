@@ -255,6 +255,10 @@ const INSTRUMENT = DIAG && DEBUG;
     let Wrapper = null;
     let offSlots = null;
     let retryTimer = null;
+    // Mounted wrappers register a synchronous stop function here. Restoring
+    // entry.component does not unmount the already-rendered tree, so the
+    // disposer must stop their drain, listeners and optimizations itself.
+    const mountedWrappers = new Set();
     const find = () => {
       try {
         const list = slots.entries(LAZY_GROUPS_SLOT);
@@ -283,6 +287,10 @@ const INSTRUMENT = DIAG && DEBUG;
         const retiredRef = React.useRef(null);
         if (retiredRef.current === null) retiredRef.current = new Set();
         const [epoch, setEpoch] = React.useState(0);
+        const [disabled, setDisabled] = React.useState(false);
+        const disabledRef = React.useRef(false);
+        const stopDrainRef = React.useRef(null);
+        const stopListenersRef = React.useRef(null);
         const drainRef = React.useRef(null);
         if (drainRef.current === null) {
           drainRef.current = {
@@ -420,7 +428,7 @@ const INSTRUMENT = DIAG && DEBUG;
         };
         const custom = React.useMemo(() => function fastloadRenderSlot(key, owner, opts) {
           report.slotCalls += 1;
-          if (key !== 'conversation.chat.node') {
+          if (disabledRef.current || disabled || key !== 'conversation.chat.node') {
             return latest.current.renderSlot(key, owner, opts);
           }
           const node = owner && owner.node;
@@ -459,9 +467,19 @@ const INSTRUMENT = DIAG && DEBUG;
           }
           report.nativeNodes += 1;
           return latest.current.renderSlot(key, owner, opts);
-        }, [progressive, epoch]);
+        }, [progressive, epoch, disabled]);
         React.useEffect(() => {
-          if (!progressive) return;
+          const stop = () => {
+            disabledRef.current = true;
+            setDisabled(true);
+            try { if (stopDrainRef.current) stopDrainRef.current(); } catch {}
+            try { if (stopListenersRef.current) stopListenersRef.current(); } catch {}
+          };
+          mountedWrappers.add(stop);
+          return () => { mountedWrappers.delete(stop); };
+        }, []);
+        React.useEffect(() => {
+          if (!progressive || disabled) return;
           const d = drainRef.current;
           if (d.cancelled) return;
           // A late snapshot can add placeholders after the first wrapper render.
@@ -481,29 +499,39 @@ const INSTRUMENT = DIAG && DEBUG;
           });
         });
         React.useEffect(() => {
-          if (!progressive) return undefined;
+          if (!progressive || disabled) return undefined;
           const d = drainRef.current;
-          return () => {
+          const cleanup = () => {
             d.cancelled = true;
             cancelIdle();
             if (d.raf1) { try { cancelAnimationFrame(d.raf1); } catch {} d.raf1 = 0; }
             if (d.raf2) { try { cancelAnimationFrame(d.raf2); } catch {} d.raf2 = 0; }
             if (prog) prog.cancelled = true;
           };
-        }, []);
+          stopDrainRef.current = cleanup;
+          return () => {
+            if (stopDrainRef.current === cleanup) stopDrainRef.current = null;
+            cleanup();
+          };
+        }, [progressive, disabled]);
         React.useEffect(() => {
-          if (!progressive) return undefined;
+          if (!progressive || disabled) return undefined;
           const onKeyDown = (event) => {
             if ((event.ctrlKey || event.metaKey) && (event.key === 'f' || event.key === 'F')) fillAllSync('keydown');
           };
           const onBeforeMatch = () => { fillAllSync('beforematch'); };
           document.addEventListener('keydown', onKeyDown, true);
           document.addEventListener('beforematch', onBeforeMatch, true);
-          return () => {
+          const cleanup = () => {
             document.removeEventListener('keydown', onKeyDown, true);
             document.removeEventListener('beforematch', onBeforeMatch, true);
           };
-        }, []);
+          stopListenersRef.current = cleanup;
+          return () => {
+            if (stopListenersRef.current === cleanup) stopListenersRef.current = null;
+            cleanup();
+          };
+        }, [progressive, disabled]);
         return React.createElement(original, Object.assign({}, props, { renderSlot: custom }));
       };
       try {
@@ -556,6 +584,10 @@ const INSTRUMENT = DIAG && DEBUG;
         try { offSlots(); } catch {}
         offSlots = null;
       }
+      for (const stop of [...mountedWrappers]) {
+        try { stop(); } catch {}
+      }
+      mountedWrappers.clear();
       if (entry !== null && Wrapper !== null) {
         try {
           if (entry.component === Wrapper) entry.component = original;

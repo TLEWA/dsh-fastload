@@ -115,6 +115,16 @@ test('the shipped client keeps the same switch, slot and marker', () => {
   assert.ok(client.includes("node.kind !== 'tool-call'"));
 });
 
+test('the disposer stops mounted wrappers before restoring the slot', () => {
+  const client = readFileSync(new URL('../client.js', import.meta.url), 'utf8');
+  assert.ok(client.includes('const mountedWrappers = new Set()'));
+  assert.ok(client.includes('for (const stop of [...mountedWrappers])'));
+  assert.ok(client.includes('disabledRef.current = true'));
+  assert.ok(client.includes('stopDrainRef.current'));
+  assert.ok(client.includes('stopListenersRef.current'));
+  assert.ok(client.includes('setDisabled(true)'));
+});
+
 test('the mirror budget constant is documented and bounded', () => {
   assert.equal(LAZY_GROUP_TEXT_MAX, 4000);
 });

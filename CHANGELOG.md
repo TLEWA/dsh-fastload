@@ -15,6 +15,7 @@
 - **构建在 settle/stat 之后重新检查 Agent 状态。** 若期间 Agent 转为 running，则跳过 follow 并重新排期。回归测试：`re-checks Agent status after the settle wait`。
 - **空闲刷新注册失败时释放已安装监听。** `agent/status` 或 `session/disposed` 订阅抛错时立即 `releaseRefresh()`，再发布 disabled 状态。回归测试：`releases idle refresh listeners when a later registration throws`。
 - **异步探测后重新确认队首。** 探测期间队首 Session 被 dispose 或 Agent 转忙而移出队列时，pump 不再误删下一项并构建过期队首，而是重新循环处理当前队首。回归测试：`does not build a cancelled queue head after the load probe`。
+- **插件卸载时停止已挂载的渐进懒加载组件。** 还原 slot `component` 不会卸载已渲染的 `FastloadLazyFlow`；现在每个挂载 wrapper 都登记同步 stop 函数，disposer 会取消 rAF/idle、移除 `keydown`/`beforematch` 监听，并让存活的 wrapper 立即回退原生渲染，不再补挂或执行 `flushSync`。回归测试：`the disposer stops mounted wrappers before restoring the slot`。
 - **销毁会话时中止在飞构建。** `noteDisposed` 在删除 `runningBuilds` 条目前先 abort 对应 controller，已销毁会话不再占用全局唯一构建槽，也不会在首帧读取释放后继续写缓存。回归测试：`aborts an in-flight capture when the session is disposed`。
 
 ### 新增
