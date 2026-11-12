@@ -56,6 +56,18 @@ the log files themselves are never modified.
   within the 150 ms delay cancels it, while a prewarm already running is left to
   finish (read-only, no activation). `localStorage['dsh-fastload.prewarm'] = '0'`
   or `window.__DSH_FASTLOAD_PREWARM__ = false` turns it off.
+- Startup prewarm: on page load the client reads
+  `localStorage['dsh.sessions.current']` and, while the workspace/session lists are
+  still loading, builds the saved session's opening page with the same passive
+  `activate: false` follow. Invalid JSON, an empty selection, a subagent address,
+  a missing or blank session, or a missing UI selection signal all skip silently.
+  It never waits for the lists, writes the selection or localStorage, navigates,
+  or creates a session. When the native restore starts opening the same session
+  (or the user picks another one), a still-waiting warm is cancelled; only this
+  plugin's own read stream is aborted, never the officially opened one. A
+  successful warm is not repeated within 60 s in the same tab. It shares the
+  hover queue and 10-minute TTL but is **off by default**: one extra opening-page
+  read on every load is only worth it when explicitly enabled.
 - Header index: `session/list` reuses the previously decoded header for session
   files whose size and mtime did not change, and coalesces repeated list requests
   within one boot. The index is written with a 1.5 s debounce and an atomic
@@ -102,10 +114,16 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_CACHE_DIR` | empty | Cache directory; empty means `$DSH_HOME/cache/dsh-fastload`. |
 | `DSH_FASTLOAD_DEBUG` | `0` | Log each trim through the DSH logger. |
 
-The web half has one switch that is not an environment variable:
-`localStorage['dsh-fastload.prewarm'] = '0'` (or
-`window.__DSH_FASTLOAD_PREWARM__ = false`) disables predictive prewarm; it is on
-by default.
+The web half has two switches that are not environment variables, with opposite
+polarities:
+
+- `localStorage['dsh-fastload.prewarm'] = '0'` (or
+  `window.__DSH_FASTLOAD_PREWARM__ = false`) disables hover predictive prewarm;
+  it is **on by default**.
+- `localStorage['dsh-fastload.restore-prewarm'] = '1'` (or
+  `window.__DSH_FASTLOAD_RESTORE_PREWARM__ = true`) enables startup prewarm; it is
+  **off by default**. A missing key, an empty value or any string other than
+  `'1'` leaves it off.
 
 ### Install
 
@@ -138,8 +156,10 @@ is what performs the background fill.
 npm test
 ```
 
-The tests cover page eligibility, the two-turn floor, turn-boundary cutting
-and hard-cap fallback. Real-browser measurements behind the defaults are in
+The tests cover page eligibility, the two-turn floor, turn-boundary cutting,
+hard-cap fallback, and the client contracts (passive prewarm, plus the startup
+warm's switch, cancellation and read-only rules). Real-browser measurements
+behind the defaults are in
 `docs/research/dsh-cdp-benchmark-results.md`.
 
 ## Evidence

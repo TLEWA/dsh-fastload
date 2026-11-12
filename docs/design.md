@@ -67,6 +67,60 @@ task, and restored the 42fe page to 780 anchors, 14,504 DOM nodes and
 already scrolls (3,622 px), so the client skips it and keeps the 268-anchor
 first page.
 
+## Startup warm (stage 2, off by default)
+
+The persisted selection is the whole uiWorkspace snapshot store value at
+`localStorage['dsh.sessions.current']`: `{ sessionId, subagentAddress? }`. The
+native `restoreSelection()` waits for both the workspace and session lists,
+then calls `replaceMain`. `replaceMain` writes the selection first and only then
+installs `mainReference`; only the blank/missing paths call
+`beginNavigation()`, so for the normal path the selection store is the only
+navigation signal available.
+
+The client therefore warms at load, without waiting for the lists:
+
+1. Parse the key. Invalid JSON, an empty value, a non-object, a missing
+   `sessionId`, or any defined `subagentAddress` skips with a reason. A legacy
+   bare-string value is accepted as a session id, matching the client's
+   `currentSessionId()` reader.
+2. Resolve `ctx.get('uiWorkspace')`. If it is absent or does not expose
+   `selection.subscribe` / `getSnapshot`, retry every 200 ms, at most 10 times,
+   re-reading the key each time. If the signal never appears, skip with
+   `cancel-signal-unavailable` instead of warming blind: a warm racing the
+   native restore would open the same page twice.
+3. Skip when `mainReference.sessionId` already equals the target, when the list
+   is already ready and the session is missing or blank, and when this tab
+   warmed the same session within 60 s (a sessionStorage guard; the disk page
+   cache is still current across a reload because the persistence revision did
+   not change).
+4. Enqueue `{ sid, source: 'restore' }` into the same serial queue and TTL map
+   as the hover warm, so hover and startup never build the same page twice and
+   the queue stays bounded at 4.
+
+Cancellation uses a `selection.subscribe` listener. It cancels a waiting or
+running restore warm when the selection changes to another session, or when the
+selection equals the target *and* `mainReference` follows one microtask later —
+`replaceMain` assigns the reference synchronously after `selection.set`, and
+the initial rehydrated value must not be mistaken for a fresh open. Cancellation
+removes the queued entry and aborts only this plugin's own `AbortController`;
+the native follow stream is never touched, and a hover warm for the same
+session is left to finish.
+
+Read-only: the follow is `{ activate: false, assistantStream: true }`, so the
+Host disposes the observation instead of promoting it, and no snapshot is
+written into the Session store. The page-cache variant matches a native first
+open because the host wrapper rewrites the initial request before hashing and
+the `assistantStream` flag is the same.
+
+Because it costs one extra opening-page read on every page load, the feature is
+off unless the user writes `localStorage['dsh-fastload.restore-prewarm'] = '1'`
+or sets `window.__DSH_FASTLOAD_RESTORE_PREWARM__ = true`. That is the opposite
+polarity from the hover switch, which is on unless explicitly disabled.
+
+`client.js` is an IIFE with no exports, so Node cannot import it; the contract
+is asserted textually in `test/package.test.js`. No real-browser benchmark has
+been run for this stage yet.
+
 ## What is intentionally absent
 
 - No DOM virtualization: that is a separate, larger change; this plugin only

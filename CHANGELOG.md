@@ -17,6 +17,15 @@
   点击到首行 337 ms → 110 ms，Host 日志确认预热请求 `activate=false`、
   点击请求 `activate=true` 且命中页缓存。可用
   `localStorage['dsh-fastload.prewarm'] = '0'` 或 `window.__DSH_FASTLOAD_PREWARM__ = false` 关闭。
+- **启动预热（阶段 2，Web 端，默认关闭）。** 页面启动时读取
+  `localStorage['dsh.sessions.current']`，在 workspace / sessions 列表仍在加载时用
+  同一套只读 `activate: false` follow 预建上次会话的首屏页，不等待列表、不写选择、
+  不导航、不建正式 Session。解析失败、空值、子代理地址、已删除/空白会话或拿不到
+  UI 选择信号时静默跳过；原生恢复开始打开同一会话（或用户改选）时取消尚未完成的
+  预热，只中止本插件自己的只读流。与 P6 共用串行队列和 10 分钟 TTL；成功预热后
+  同一标签页 60 秒内不重复。开关与 P6 极性相反：
+  `localStorage['dsh-fastload.restore-prewarm'] = '1'` 或
+  `window.__DSH_FASTLOAD_RESTORE_PREWARM__ = true` 才开启。真实浏览器基准未执行。
 
 ## [0.3.1] - 2026-11-12
 

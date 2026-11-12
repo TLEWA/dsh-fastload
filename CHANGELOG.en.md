@@ -20,6 +20,20 @@ All notable changes are documented here. Versions follow
   `activate=true` served from cache. Disable with
   `localStorage['dsh-fastload.prewarm'] = '0'` or
   `window.__DSH_FASTLOAD_PREWARM__ = false`.
+- **Startup prewarm (stage 2, web client, off by default).** On page load the
+  client reads `localStorage['dsh.sessions.current']` and, while the
+  workspace/session lists are still loading, builds the saved session's opening
+  page with the same passive `activate: false` follow. It never waits for the
+  lists, writes the selection, navigates, or creates a session. Invalid JSON, an
+  empty value, a subagent address, a missing or blank session, or a missing UI
+  selection signal all skip silently. When the native restore starts opening the
+  same session (or the user picks another one), an unfinished warm is cancelled
+  and only this plugin's own read stream is aborted. It shares the P6 serial
+  queue and 10-minute TTL; a successful warm is not repeated within 60 s in the
+  same tab. The switch has the opposite polarity from P6: only
+  `localStorage['dsh-fastload.restore-prewarm'] = '1'` or
+  `window.__DSH_FASTLOAD_RESTORE_PREWARM__ = true` enables it. No real-browser
+  benchmark was run for this stage.
 
 ## [0.3.1] - 2026-11-12
 

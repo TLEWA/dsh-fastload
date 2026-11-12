@@ -45,6 +45,12 @@
 - 保持现有节奏常量：首轮 900ms、重试 700ms、最多 8 次、输入空闲 1500ms；用
   `data-fastload-autoloaded` 去重；卸载时必须清理 interval、timer 和事件监听。
 - 客户端只在 web 平台加载；不要引入 DOM 虚拟化或缓存，这些是明确不做的范围。
+- 启动预热默认关闭且与悬停开关极性相反：仅
+  `localStorage['dsh-fastload.restore-prewarm'] === '1'` 或
+  `window.__DSH_FASTLOAD_RESTORE_PREWARM__ === true` 时运行。必须先从
+  `ctx.get('uiWorkspace').selection` 拿到取消信号，拿不到就跳过，不得裸跑；
+  取消时只 abort 本插件 restore 来源的 `AbortController`，不得触碰原生 follow 流；
+  不写 `dsh.sessions.current`，也不向正式 Session Store 写预热快照。
 
 ### 测试与文档
 

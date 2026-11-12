@@ -40,6 +40,78 @@ const readmeEnUrl = new URL('../README.en.md', import.meta.url);
 // DSH_FASTLOAD_ENABLED=0 only turns off the host half; the web client still
 // fills one page after the first paint. Both READMEs must scope the switch
 // that way instead of promising a total disable (audit FL-02).
+test('startup prewarm is opt-in with the opposite polarity of the hover warm', async () => {
+  const source = await readFile(clientUrl, 'utf8');
+  const start = source.indexOf('const restorePrewarmAllowed');
+  assert.ok(start > 0, 'client defines restorePrewarmAllowed');
+  const body = source.slice(start, source.indexOf('\n            };', start));
+  // Stage 2's plan requires this hint to default off: an absent key must not
+  // enable it, and the window override must be exactly true (not merely set).
+  assert.match(body, /localStorage\.getItem\(RESTORE_PREWARM_KEY\) === '1'/);
+  assert.match(body, /__DSH_FASTLOAD_RESTORE_PREWARM__ === true/);
+  assert.doesNotMatch(body, /!== '0'/);
+  assert.match(source, /RESTORE_PREWARM_KEY = 'dsh-fastload\.restore-prewarm'/);
+});
+
+test('startup prewarm validates the saved selection before touching the host', async () => {
+  const source = await readFile(clientUrl, 'utf8');
+  assert.match(source, /localStorage\.getItem\('dsh\.sessions\.current'\)/);
+  // restoreSelection() sends any defined subagentAddress down the subagent
+  // branch; this first version deliberately skips those targets.
+  assert.match(source, /parsed\.subagentAddress !== undefined/);
+  assert.match(source, /'invalid-json'/);
+  assert.match(source, /'invalid-shape'/);
+  assert.match(source, /'missing-session-id'/);
+  assert.match(source, /'subagent'/);
+  // The plugin observes the persisted selection; it must never write it or
+  // navigate the page to it.
+  assert.doesNotMatch(source, /setItem\(\s*['"]dsh\.sessions\.current/);
+  assert.doesNotMatch(source, /\b(location\.(assign|replace|reload)|history\.(pushState|replaceState))/);
+  // List readiness is only a bonus check; waiting on it would defeat the
+  // startup overlap.
+  assert.match(source, /phase !== 'ready'/);
+});
+
+test('startup prewarm shares the hover queue but cancels only its own stream', async () => {
+  const source = await readFile(clientUrl, 'utf8');
+  // One serial queue, one TTL map, but each entry remembers why it exists.
+  assert.match(source, /prewarmQueue\.push\(\{\s*sid,\s*source: origin\s*\}\)/);
+  assert.match(source, /entry\.source === 'restore'/);
+  assert.match(source, /source === 'restore' \? 'restore' : 'hover'/);
+  // The native open is observed through the live workspace service: the
+  // persisted key already equals the target before restore happens.
+  assert.match(source, /ctx\.get\('uiWorkspace'\)/);
+  assert.match(source, /service\.selection\.subscribe/);
+  assert.match(source, /mainReference/);
+  assert.match(source, /queueMicrotask/);
+  // Cancel path: only this plugin's restore-sourced passive follow is aborted.
+  const start = source.indexOf('const cancelRestorePrewarm');
+  assert.ok(start > 0, 'client defines cancelRestorePrewarm');
+  const body = source.slice(start, source.indexOf('const armRestoreWatch', start));
+  assert.match(body, /cancelQueuedPrewarm\(restorePrewarm\.sid, 'restore'\)/);
+  assert.match(body, /prewarmActive\.source === 'restore'/);
+  assert.match(body, /prewarmActive\.sid === restorePrewarm\.sid/);
+  assert.match(body, /controller\.abort\(\)/);
+  // No reliable signal means no warm: retries are bounded and give up.
+  assert.match(source, /'cancel-signal-unavailable'/);
+  assert.match(source, /RESTORE_SIGNAL_RETRIES/);
+  // Reloading eagerly must not stack warmups: one success per tab per minute.
+  assert.match(source, /sessionStorage\.setItem\(RESTORE_WARM_GUARD_KEY/);
+  assert.match(source, /'recently-warmed'/);
+  assert.match(source, /restorePrewarm: state\.restorePrewarm/);
+});
+
+test('READMEs document the startup warm as off by default', async () => {
+  const zh = await readFile(readmeZhUrl, 'utf8');
+  const en = await readFile(readmeEnUrl, 'utf8');
+  for (const [name, text] of [['zh', zh], ['en', en]]) {
+    assert.match(text, /dsh-fastload\.restore-prewarm/, name + ' documents the switch key');
+    assert.match(text, /__DSH_FASTLOAD_RESTORE_PREWARM__/, name + ' documents the window override');
+  }
+  assert.match(zh, /默认关闭/);
+  assert.match(en, /off by default/i);
+});
+
 test('READMEs scope DSH_FASTLOAD_ENABLED=0 to the host half', async () => {
   const zh = await readFile(readmeZhUrl, 'utf8');
   const en = await readFile(readmeEnUrl, 'utf8');

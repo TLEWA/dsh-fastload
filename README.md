@@ -45,6 +45,14 @@ firstAnchor 看起来很快，实际上是一个空页。
   只预热一次；延迟窗口内移开指针会取消，已经开始的预热会跑完（只读、不激活）。
   `localStorage['dsh-fastload.prewarm'] = '0'` 或
   `window.__DSH_FASTLOAD_PREWARM__ = false` 可关闭。
+- 启动预热：页面启动时读取 `localStorage['dsh.sessions.current']`，在 workspace /
+  sessions 列表仍加载时，用同一个只读的 `activate: false` follow 预建上次会话的
+  首屏页。解析失败、空选择、子代理地址、已删除/空白会话或拿不到 UI 选择信号时
+  静默跳过；不等列表 ready、不写选择、不导航、不建正式 Session。原生恢复开始
+  打开同一会话（或用户改选别的会话）时取消尚在等待的预热；只中止本插件自己
+  发起的只读流，正式打开的流不会被中断。成功后同一标签页 60 秒内不重复预热。
+  与悬停预加载共用串行队列和 10 分钟 TTL，但**默认关闭**：每次页面加载多一次
+  首屏读取，只有显式开启才值得。
 - 会话头索引：`session/list` 对未变化的会话文件直接复用上次解析出的 header，
   并把一次启动内的重复列表请求合成一次；索引写入 1.5 秒防抖、原子替换，
   文件大小或 mtime 变了自然失效。
@@ -85,8 +93,13 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_CACHE_DIR` | 空 | 缓存目录；空表示 `$DSH_HOME/cache/dsh-fastload`。 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条 DSH 日志。 |
 
-Web 端还有一个不进环境变量的开关：`localStorage['dsh-fastload.prewarm'] = '0'`
-（或 `window.__DSH_FASTLOAD_PREWARM__ = false`）关闭会话预测性预加载，默认开启。
+Web 端还有两个不进环境变量的开关，极性相反，别写反：
+
+- `localStorage['dsh-fastload.prewarm'] = '0'`（或
+  `window.__DSH_FASTLOAD_PREWARM__ = false`）关闭会话悬停预测性预加载，**默认开启**。
+- `localStorage['dsh-fastload.restore-prewarm'] = '1'`（或
+  `window.__DSH_FASTLOAD_RESTORE_PREWARM__ = true`）开启启动预热，**默认关闭**。
+  缺省、空值或任何非 `'1'` 的字符串都不会开启它。
 
 ### 安装
 
@@ -114,7 +127,8 @@ patch（或用 `--patch` 传入）中加入：
 npm test
 ```
 
-测试覆盖首屏判定、两 turn 下限、turn 边界裁切和硬上限回退。默认参数的
+测试覆盖首屏判定、两 turn 下限、turn 边界裁切、硬上限回退，以及客户端契约
+（被动预加载、启动预热的开关/取消/只读）。默认参数的
 真实浏览器数据见 `docs/research/dsh-cdp-benchmark-results.md`。
 
 ## 实测依据
