@@ -24,6 +24,16 @@ test('client registers a module and keeps the auto-fill contract', async () => {
 });
 
 
+test('the predictive prewarm stays a passive follow', async () => {
+  const source = await readFile(clientUrl, 'utf8');
+  // The web half needs the Remote session service to open a passive read.
+  assert.match(source, /inject: \[[^\]]*remote\.session/);
+  // A prewarm must never activate the Agent: the host only promotes on true.
+  assert.match(source, /activate: false/);
+  assert.match(source, /PREWARM_MAX_QUEUE/);
+  assert.match(source, /dsh-fastload\.prewarm/);
+});
+
 const readmeZhUrl = new URL('../README.md', import.meta.url);
 const readmeEnUrl = new URL('../README.en.md', import.meta.url);
 

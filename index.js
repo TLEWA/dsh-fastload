@@ -564,7 +564,8 @@ export function apply(ctx) {
                 ' before=' + (next.beforeSeq ?? '-') + ' through=' + (next.throughSeq ?? '-') +
                 ' max=' + (next.maxMessages ?? '-') + ' turns=' +
                 (next.turnWindow ? next.turnWindow.minMessages + '/' + next.turnWindow.minTurns : '-') +
-                ' stream=' + (next.assistantStream === true ? 'on' : 'off')
+                ' stream=' + (next.assistantStream === true ? 'on' : 'off') +
+                ' activate=' + (next.activate === true ? 'true' : 'false')
             );
           } catch {}
         }

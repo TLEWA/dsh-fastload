@@ -48,6 +48,14 @@ the log files themselves are never modified.
   pair and every message in it is hidden by the rewind plugin's cut ranges, one
   more page is prepended (at most once) so the very first dispatch already
   carries visible content. Sessions without rewinds pay nothing.
+- Predictive prewarm: hovering or focusing a sidebar session row for 150 ms makes
+  the web client issue a passive `session/follow` (`activate: false`) that builds
+  the opening page and stores it in the page cache — no Agent activation, no
+  session mutation. A real click then hits the cache. The queue holds at most 4
+  serialized jobs, one prewarm per session per 10 minutes; moving the pointer
+  within the 150 ms delay cancels it, while a prewarm already running is left to
+  finish (read-only, no activation). `localStorage['dsh-fastload.prewarm'] = '0'`
+  or `window.__DSH_FASTLOAD_PREWARM__ = false` turns it off.
 - Header index: `session/list` reuses the previously decoded header for session
   files whose size and mtime did not change, and coalesces repeated list requests
   within one boot. The index is written with a 1.5 s debounce and an atomic
@@ -93,6 +101,11 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | Maximum cached page files. |
 | `DSH_FASTLOAD_CACHE_DIR` | empty | Cache directory; empty means `$DSH_HOME/cache/dsh-fastload`. |
 | `DSH_FASTLOAD_DEBUG` | `0` | Log each trim through the DSH logger. |
+
+The web half has one switch that is not an environment variable:
+`localStorage['dsh-fastload.prewarm'] = '0'` (or
+`window.__DSH_FASTLOAD_PREWARM__ = false`) disables predictive prewarm; it is on
+by default.
 
 ### Install
 

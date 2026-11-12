@@ -39,6 +39,12 @@ firstAnchor 看起来很快，实际上是一个空页。
 - rewind 感知首屏：初始页里出现完整的 `/rewind` 命令对时，若该页的可见
   消息被 rewind 插件的裁剪区间全部隐藏，就把页起点向前扩一页（只补一次），
   让第一次派发就带可见内容。正常会话不触发，零额外开销。
+- 预测性预加载：鼠标悬停或键盘聚焦侧栏会话行 150 ms 后，Web 端用
+  `activate: false` 的被动 `session/follow` 预建首屏页并写入页缓存（不开 Agent、
+  不改会话）；真正点击时直接命中缓存。队列最多 4 个、串行执行，同一会话 10 分钟内
+  只预热一次；延迟窗口内移开指针会取消，已经开始的预热会跑完（只读、不激活）。
+  `localStorage['dsh-fastload.prewarm'] = '0'` 或
+  `window.__DSH_FASTLOAD_PREWARM__ = false` 可关闭。
 - 会话头索引：`session/list` 对未变化的会话文件直接复用上次解析出的 header，
   并把一次启动内的重复列表请求合成一次；索引写入 1.5 秒防抖、原子替换，
   文件大小或 mtime 变了自然失效。
@@ -78,6 +84,9 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | 页缓存文件数上限。 |
 | `DSH_FASTLOAD_CACHE_DIR` | 空 | 缓存目录；空表示 `$DSH_HOME/cache/dsh-fastload`。 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条 DSH 日志。 |
+
+Web 端还有一个不进环境变量的开关：`localStorage['dsh-fastload.prewarm'] = '0'`
+（或 `window.__DSH_FASTLOAD_PREWARM__ = false`）关闭会话预测性预加载，默认开启。
 
 ### 安装
 

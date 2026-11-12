@@ -44,7 +44,7 @@
   // Every served module instance stamps its build id into the probe payload:
   // two instances of this client can coexist while a page is being rebuilt,
   // and a stale one would answer the probe with old logic.
-  const BUILD = 'v18';
+  const BUILD = 'v19';
 // Instrumentation patches hot paths (assembler flush, chat builder replace),
 // so it stays off unless explicitly asked for: localStorage
 // 'dsh-fastload.debug' = '1', or window.__DSH_FASTLOAD_DEBUG__ = true.
@@ -76,6 +76,15 @@ const DEBUG = (() => {
   // surviving history is simply further back, so walking back is the repair.
   const ADVANCE_MAX = 4;
   const ADVANCE_GAP_MS = 700;
+  // P6: hovering a sidebar row is the strongest hint about which session opens
+  // next. A passive follow builds and caches the opening page off the critical
+  // path, without activating the Agent (the host only promotes when
+  // activate === true). Delayed, deduplicated and serialized so a fast sweep
+  // down the list cannot start a fleet of log parses.
+  const PREWARM_KEY = 'dsh-fastload.prewarm';
+  const PREWARM_DELAY_MS = 150;
+  const PREWARM_TTL_MS = 10 * 60 * 1000;
+  const PREWARM_MAX_QUEUE = 4;
 
   if (typeof window === 'undefined' || !window.__ModuleLoader__) return;
 
@@ -83,7 +92,7 @@ const DEBUG = (() => {
     id: MODULE_ID,
     factory() {
       return {
-        inject: [],
+        inject: ['remote', 'remote.session'],
         apply(ctx) {
           if (typeof document === 'undefined') return;
 
@@ -136,6 +145,156 @@ const DEBUG = (() => {
             };
             const timers = new Set();
             let lastInputAt = -Infinity;
+
+            // P6 prewarm state. Everything is per-effect so a module reload
+            // leaves no listeners, timers or in-flight streams behind.
+            const prewarm = {
+              at: null,
+              sid: null,
+              ms: null,
+              ok: null,
+              done: 0,
+              failed: 0,
+              skipped: 0,
+              queued: 0,
+              error: null,
+            };
+            state.prewarm = prewarm;
+            const prewarmed = new Map();
+            const prewarmQueue = [];
+            let prewarmActive = null;
+            let prewarmTimer = null;
+            let prewarmPending = null;
+            let disposed = false;
+
+            const prewarmAllowed = () => {
+              try {
+                if (localStorage.getItem(PREWARM_KEY) === '0') return false;
+              } catch {}
+              return window.__DSH_FASTLOAD_PREWARM__ !== false;
+            };
+            const rowSessionId = (node) => {
+              if (!node || typeof node.closest !== 'function') return null;
+              const row = node.closest('[data-row-key^="session:"]');
+              if (!row) return null;
+              const key = row.getAttribute('data-row-key') || '';
+              const id = key.slice('session:'.length);
+              return id === '' ? null : id;
+            };
+            const remoteSession = () => {
+              try {
+                const remote = ctx ? ctx.remote : undefined;
+                const session = remote && remote.session;
+                return session && typeof session.follow === 'function' ? session : null;
+              } catch {
+                return null;
+              }
+            };
+            const drainPrewarm = () => {
+              if (disposed || prewarmActive !== null) return;
+              while (prewarmQueue.length > 0) {
+                const sid = prewarmQueue.shift();
+                if (sid === currentSessionId()) continue;
+                void runPrewarm(sid);
+                return;
+              }
+            };
+            const runPrewarm = async (sid) => {
+              const session = remoteSession();
+              if (!session) {
+                prewarm.skipped += 1;
+                prewarm.error = 'remote.session.follow is unavailable';
+                return;
+              }
+              const controller = new AbortController();
+              prewarmActive = { sid, controller };
+              const startedAt = Date.now();
+              try {
+                const stream = session.follow(
+                  {
+                    address: { kind: 'session', sessionId: sid },
+                    assistantStream: true,
+                    activate: false,
+                  },
+                  controller.signal
+                );
+                const iterator = stream && typeof stream[Symbol.asyncIterator] === 'function'
+                  ? stream[Symbol.asyncIterator]()
+                  : stream;
+                const first = await iterator.next();
+                if (!first.done) {
+                  prewarmed.set(sid, Date.now());
+                  prewarm.done += 1;
+                  prewarm.at = Date.now();
+                  prewarm.sid = sid;
+                  prewarm.ms = Date.now() - startedAt;
+                  prewarm.ok = true;
+                } else {
+                  prewarm.skipped += 1;
+                }
+                try {
+                  await iterator.return?.();
+                } catch {}
+              } catch (error) {
+                prewarm.failed += 1;
+                prewarm.ok = false;
+                prewarm.error = String((error && error.message) || error).slice(0, 200);
+              } finally {
+                prewarmActive = null;
+                drainPrewarm();
+              }
+            };
+            const queuePrewarm = (sid) => {
+              const now = Date.now();
+              const last = prewarmed.get(sid);
+              if (last !== undefined && now - last < PREWARM_TTL_MS) {
+                prewarm.skipped += 1;
+                return;
+              }
+              if (prewarmActive !== null && prewarmActive.sid === sid) return;
+              if (prewarmQueue.includes(sid)) return;
+              if (prewarmQueue.length >= PREWARM_MAX_QUEUE) {
+                prewarm.skipped += 1;
+                return;
+              }
+              prewarmQueue.push(sid);
+              prewarm.queued = prewarmQueue.length;
+              drainPrewarm();
+            };
+            const cancelPendingPrewarm = () => {
+              if (prewarmTimer !== null) {
+                clearTimeout(prewarmTimer);
+                timers.delete(prewarmTimer);
+                prewarmTimer = null;
+              }
+              prewarmPending = null;
+            };
+            const onPrewarmOver = (event) => {
+              if (!prewarmAllowed() || document.hidden) return;
+              const sid = rowSessionId(event.target);
+              if (sid === null || sid === currentSessionId()) return;
+              if (prewarmPending === sid) return;
+              cancelPendingPrewarm();
+              prewarmPending = sid;
+              prewarmTimer = setTimeout(() => {
+                timers.delete(prewarmTimer);
+                prewarmTimer = null;
+                const target = prewarmPending;
+                prewarmPending = null;
+                if (target !== null) queuePrewarm(target);
+              }, PREWARM_DELAY_MS);
+              timers.add(prewarmTimer);
+            };
+            const onPrewarmOut = (event) => {
+              const sid = rowSessionId(event.target);
+              if (sid === null || sid !== prewarmPending) return;
+              const next = rowSessionId(event.relatedTarget);
+              if (next === sid) return;
+              cancelPendingPrewarm();
+            };
+            document.addEventListener('pointerover', onPrewarmOver, { capture: true, passive: true });
+            document.addEventListener('pointerout', onPrewarmOut, { capture: true, passive: true });
+            document.addEventListener('focusin', onPrewarmOver, { capture: true });
 
             const noteInput = () => {
               lastInputAt = performance.now();
@@ -1212,7 +1371,7 @@ const DEBUG = (() => {
                 flows,
                 slotErrors: [...document.querySelectorAll('[data-slot-error]')].map((node) => node.getAttribute('data-slot-error')),
                 factoryErrors: [...document.querySelectorAll('[data-factory-error]')].map((node) => node.getAttribute('data-factory-error')),
-                client: { build: BUILD, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, healed: state.healed, repairs: state.repairs, advance: state.advance, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error },
+                client: { build: BUILD, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, healed: state.healed, repairs: state.repairs, advance: state.advance, prewarm: state.prewarm, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error },
                 fibers: fiberProbe(),
                 feed: sessionFeed(true),
                 conversation: conversationProbe(true),
@@ -1383,6 +1542,15 @@ const DEBUG = (() => {
             const interval = setInterval(scan, 500);
 
             return () => {
+              disposed = true;
+              cancelPendingPrewarm();
+              prewarmQueue.length = 0;
+              try {
+                if (prewarmActive !== null) prewarmActive.controller.abort();
+              } catch {}
+              document.removeEventListener('pointerover', onPrewarmOver, { capture: true });
+              document.removeEventListener('pointerout', onPrewarmOut, { capture: true });
+              document.removeEventListener('focusin', onPrewarmOver, { capture: true });
               clearInterval(interval);
               for (const timer of timers) clearTimeout(timer);
               timers.clear();

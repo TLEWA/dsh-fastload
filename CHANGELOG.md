@@ -5,6 +5,19 @@
 
 [简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md)
 
+## [Unreleased]
+
+### 新增
+
+- **会话预测性预加载（P6，Web 端）。** 鼠标悬停或键盘聚焦侧栏会话行 150 ms 后，
+  客户端用 `session/follow({ activate: false })` 预建首屏页并落页缓存；真实点击
+  直接命中缓存。被动读取不会激活 Agent、不写会话；队列最多 4 个、串行执行，
+  同一会话 10 分钟内只预热一次；延迟窗口内移开指针会取消，已开始的预热跑完即止
+  （只读、不激活）。bench 同一会话冷启动实测
+  点击到首行 337 ms → 110 ms，Host 日志确认预热请求 `activate=false`、
+  点击请求 `activate=true` 且命中页缓存。可用
+  `localStorage['dsh-fastload.prewarm'] = '0'` 或 `window.__DSH_FASTLOAD_PREWARM__ = false` 关闭。
+
 ## [0.3.1] - 2026-11-12
 
 ### 新增
