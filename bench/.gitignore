@@ -1,0 +1,6 @@
+results/
+.chrome/
+.home/
+tmp/
+samples.local.json
+.tools/
