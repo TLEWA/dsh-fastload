@@ -27,6 +27,15 @@
   刷新请求带内部标记，不经过页缓存服务、不计入缓存命中；不激活 Agent、不写 session
   store、不改原始日志。用 `DSH_FASTLOAD_IDLE_CACHE_REFRESH=1` 开启；真实首开收益本次
   未执行测量。
+- **延后真实 follow（阶段 5，Host 端，默认关闭）。** 页缓存命中且请求为初始页、
+  `activate !== true`、`assistantStream` 无进行中的 attempt、Agent 已知空闲时，缓存帧发出后
+  把真实 `follow` 的构建延后最多 16 ms（切片调度，同 session 新请求、abort 或 Agent 转忙
+  立即取消）；任一条件不满足或状态无法判断都保持原时序，延后期间出错回退到阶段 3 的单次
+  `setImmediate`。默认关闭时时序、字节和日志与阶段 3 一致；`DSH_FASTLOAD_DEBUG=1` 时
+  `serve.log` 增加 `timing` 行（`lookup/send/resume/defer/live/build/stall`），默认路径不读
+  时钟。A/B 实测（最终每组 8 次命中，另有每组 16 次的前置块）：真实构建约 4–5 ms，真实
+  首帧在缓存帧发出后 11–20 ms 到达，首行在发出后约 170 ms 才出现，未观察到与首帧绘制的
+  竞争；开关默认关闭，暂不建议开启。
 - **会话预测性预加载（P6，Web 端）。** 鼠标悬停或键盘聚焦侧栏会话行 150 ms 后，
   客户端用 `session/follow({ activate: false })` 预建首屏页并落页缓存；真实点击
   直接命中缓存。被动读取不会激活 Agent、不写会话；队列最多 4 个、串行执行，

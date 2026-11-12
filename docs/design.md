@@ -191,6 +191,101 @@ land after the batch, and the second read catches appends that happened while th
 page was being built. If a read fails, the API shape is unknown, or the same
 session keeps failing, the refresher disables itself instead of guessing.
 
+## Deferred live build
+
+On a page-cache hit the wrapper yields the cached snapshot, waits for the caller to
+resume (the browser can mount the cached frame), and only then starts the real
+`follow`; that build replays just the events after the cached cursor. Stage 5
+asked whether this build actually competes with painting the cached first frame.
+A switch, off by default, can defer the build after the cached frame. The
+measurement below is the reason it should stay off.
+
+### Instrumentation
+
+With `DSH_FASTLOAD_DEBUG=1` the wrapper records epoch-based `performance.now()`
+marks: cache lookup done, cached frame send start/end, first resume after the
+caller pulls, defer wait, build start and the first live frame. The result is a
+`timing` line in `serve.log` and `state.pageCacheTiming`:
+
+```text
+timing sid=… lookup=… send=… resume=… defer=… live=… stall=… lagSlices=…
+       total=… wallSend=… wallBuild=… deferReason=…
+```
+
+`live` runs from the start of the follow attempt to the live frame, so it already
+contains lookup/send/defer. The derived values used below are
+`build = live - (send + buildStartAfterSend)` and
+`liveFrameAfterSend = live - send`; `send` ends when the consumer asks for the
+next frame, not when the last byte left the Host. A `setImmediate` chain starts
+before the cache lookup and stops at the live frame; `stall` is the largest gap
+between two turns minus the smallest, and `lagSlices` counts the turns. The
+default path does no clock reads and writes no extra bytes.
+
+### Gate and scheduling
+
+`DSH_FASTLOAD_DEFER_LIVE_BUILD=1` delays only when every condition holds:
+
+- the request is an initial page (no `beforeSeq` / `throughSeq`);
+- `activate !== true` (a request that activates the Agent keeps the stock order);
+- the page cache really hit and supplied a usable opening;
+- `assistantStream` has no `activeAttempt` (no in-progress streamed reply);
+- the Agent status is known and `idle` — an unknown status or a busy Agent refuses;
+- the incoming `signal` is not aborted.
+
+The wait has a 16 ms soft budget and at most 8 slices, alternating
+`setImmediate` and `setTimeout(0)`; the status is re-read before every slice. A
+new request for the same session, an abort, an Agent status change or plugin
+disposal cancels a not-yet-run delay. The wait never rejects: a refused gate or an
+error falls back to the original stage 3 ordering (`yield cached` then a single
+`setImmediate`), so the opening protocol still sees exactly one snapshot. The
+budget is soft because one slice can overrun it; the largest observed wait was
+29.7 ms.
+
+### Measurement
+
+Isolated `DSH_HOME`, `dsh` 0.2.1-rc.5 `web` profile, headless Chrome 157 over
+CDP, one 814-record session, the same plugin build in both arms. Arm A had the
+switch off, arm B on; each arm ran 8 cache-hit opens after a warm-up round. The
+browser navigated to the session, polled `[data-chat-node-key]` for the first row,
+and the host read the `timing` line from `serve.log`. An earlier block of 16
+hits per arm, with the loop probe started later, produced the same row-time
+conclusion (off 816.5 ms, on 768 ms median) but no loop samples; the final block
+below is the one tabulated. Medians [min–max], ms:
+
+| metric | A: off (n=8) | B: on (n=8) |
+|---|---:|---:|
+| navigation → first row | 594 [580–707] | 596 [586–646] |
+| cache frame send | 11.2 [8.7–18.3] | 11.5 [9.1–14.5] |
+| defer wait | 0 | 3.7 [3.6–8.0] |
+| real build duration | 4.7 [4.3–233.4] | 4.3 [3.5–5.2] |
+| live frame after send | 11.1 [10.5–241.4] | 15.9 [15.0–20.1] |
+| first row after send | 168.5 [162–201] | 170.5 [167–184] |
+| first row after live frame | 156.6 [−40.4–165.7] | 154.9 [151.2–163.9] |
+| host loop stall | 11.0 [10.2–195.9] | 11.0 [10.4–12.0] |
+
+The real build is about 4–5 ms and the live frame reaches the client 11–20 ms
+after the cached frame. The first row appears about 170 ms after the cached frame
+and about 155 ms after the live frame, so moving the build by 3.7–8 ms cannot
+affect the first paint; navigation-to-row medians differ by 2 ms. One arm A run
+hit a 196 ms Host-loop gap, which also stretched its build to 233 ms and its live
+frame to 241 ms after send, yet its first row still came 40 ms after the live
+frame. The deferral runs 8 slices and stopped at 3.6–8.0 ms because each slice
+was about 0.5 ms here; the earlier block, on a slower loop, reached 29.7 ms.
+`stall` of about 11 ms in both arms is Host jitter across the whole open, not a
+build-specific block: the build itself is only 4–5 ms. The earlier 16-hit block
+gave the same verdict (build 6.4 vs 5.8 ms; first row 816.5 vs 768 ms), so the
+result is not specific to one block.
+
+### Conclusion
+
+No competition between the real follow build and the cached first frame was
+observable, so the switch stays off by default and enabling it is not recommended.
+The gate also refuses the inspected desktop client 0.2.2-rc.1, whose session
+restore hardcodes `activate: true`; the measured 0.2.1-rc.5 host sent
+`activate: false`. If the client timing changes, the switch and the timing line
+are available to repeat the measurement; otherwise this is a candidate for removal
+in a later cleanup.
+
 ## What is intentionally absent
 
 - No DOM virtualization: that is a separate, larger change; this plugin only

@@ -90,6 +90,22 @@ async function waitFor(predicate, timeoutMs = 3000) {
   assert.ok(predicate(), 'condition not met within ' + timeoutMs + 'ms');
 }
 
+// Page-cache writes are zstd-compressed off the main path, so a teardown that
+// removes the cache directory immediately after `dispose()` can race the last
+// write (ENOTEMPTY on Windows). Retry the removal briefly instead of failing.
+async function cleanupDir(dir) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      await fsp.rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error.code !== 'ENOTEMPTY' && error.code !== 'EBUSY' && error.code !== 'EPERM') throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  await fsp.rm(dir, { recursive: true, force: true });
+}
+
 async function withEnv(values, fn) {
   const previous = {};
   for (const [key, value] of Object.entries(values)) {
@@ -441,7 +457,7 @@ test('serves a cached opening and swallows the duplicate live opening', async ()
       second.dispose();
     });
   } finally {
-    await fsp.rm(dir, { recursive: true, force: true });
+    await cleanupDir(dir);
   }
 });
 
@@ -480,7 +496,7 @@ test('replays events appended after the cached cursor', async () => {
       second.dispose();
     });
   } finally {
-    await fsp.rm(dir, { recursive: true, force: true });
+    await cleanupDir(dir);
   }
 });
 
@@ -506,7 +522,7 @@ test('keeps idle refresh off by default and registers no listeners', async () =>
       }
     );
   } finally {
-    await fsp.rm(dir, { recursive: true, force: true });
+    await cleanupDir(dir);
   }
 });
 
@@ -578,7 +594,7 @@ test('idle refresh warms the canonical page and never activates the Agent', asyn
       }
     );
   } finally {
-    await fsp.rm(dir, { recursive: true, force: true });
+    await cleanupDir(dir);
   }
 });
 
@@ -609,7 +625,7 @@ test('leaves follow working when the Host cannot register event listeners', asyn
       }
     );
   } finally {
-    await fsp.rm(dir, { recursive: true, force: true });
+    await cleanupDir(dir);
   }
 });
 
@@ -637,6 +653,207 @@ test('re-applying with idle refresh keeps a single refresher', async () => {
       }
     );
   } finally {
-    await fsp.rm(dir, { recursive: true, force: true });
+    await cleanupDir(dir);
   }
 });
+
+test('re-applying with deferred live build keeps one gate and its counters', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_DEFER_LIVE_BUILD: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext();
+        const options = { defer: { statusOf: () => 'idle' } };
+        apply(t.ctx, options);
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.ok(state.deferLiveBuild);
+        assert.equal(t.sc.__dshFastload, true);
+        const report = state.deferLiveBuild;
+        apply(t.ctx, options);
+        assert.equal(t.sc.__dshFastload, true);
+        assert.equal(state.deferLiveBuild, report, 're-apply must not detach the live counters');
+        t.dispose();
+        assert.equal(state.installed, false);
+        assert.equal(t.sc.__dshFastload, undefined);
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+const cachedPage = () => ({
+  type: 'snapshot',
+  cursor: 3,
+  hasMore: true,
+  assistantStream: { revision: 0 },
+  records: [rec(1, 'turn/start'), rec(2, 'user/message', { message: { content: 'q' } }), rec(3, 'assistant/message', { message: { content: 'a' } })],
+});
+
+async function warmOnePage(dir, persistence, env) {
+  return withEnv(env, async () => {
+    const t = makeContext({ services: { sessionPersistence: persistence } });
+    t.sc.follow = async function* (request) {
+      this.calls.push(request);
+      yield cachedPage();
+    };
+    apply(t.ctx);
+    const stream = t.sc.follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-test' } });
+    // Drain the stream so the wrapper observes the live frame, verifies the
+    // cursor and stores the page; reading only the first frame never stores.
+    for await (const _frame of stream) { /* drain */ }
+    await globalThis.__DSH_FASTLOAD__.pageCache.flush();
+    t.dispose();
+  });
+}
+
+test('keeps deferred live build off by default and serves the cache unchanged', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({ services: { sessionPersistence: persistence } });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx);
+      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild, null);
+      const stream = t.sc.follow({ maxMessages: 500, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      const first = await stream.next();
+      assert.equal(first.value.type, 'snapshot');
+      const end = await stream.next();
+      assert.equal(end.done, true);
+      t.dispose();
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('defers a passive cache hit only when the Agent is known idle', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+    DSH_FASTLOAD_DEFER_LIVE_BUILD: '1',
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({
+        services: {
+          sessionPersistence: persistence,
+          agents: { get: () => ({ status: 'idle' }) },
+        },
+      });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx, { defer: { budgetMs: 3, maxSlices: 3 } });
+      const report = globalThis.__DSH_FASTLOAD__.deferLiveBuild;
+      assert.equal(report.enabled, true);
+      assert.equal(report.budgetMs, 3);
+      const stream = t.sc.follow({ maxMessages: 500, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      assert.equal((await stream.next()).value.type, 'snapshot');
+      assert.equal((await stream.next()).done, true);
+      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild.deferrals, 1);
+      t.dispose();
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('never defers an activating or paged follow', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+    DSH_FASTLOAD_DEFER_LIVE_BUILD: '1',
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({
+        services: {
+          sessionPersistence: persistence,
+          agents: { get: () => ({ status: 'idle' }) },
+        },
+      });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx, { defer: { budgetMs: 3, maxSlices: 3 } });
+      const activating = t.sc.follow({ maxMessages: 500, activate: true, address: { kind: 'session', sessionId: 'session-test' } });
+      assert.equal((await activating.next()).value.type, 'snapshot');
+      assert.equal((await activating.next()).done, true);
+      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild.deferrals, 0);
+
+      const paged = t.sc.follow({ maxMessages: 500, beforeSeq: 10, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      assert.equal((await paged.next()).value.type, 'snapshot');
+      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild.deferrals, 0);
+      t.dispose();
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('disposing the plugin clears a pending deferral', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+    DSH_FASTLOAD_DEFER_LIVE_BUILD: '1',
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({
+        services: {
+          sessionPersistence: persistence,
+          agents: { get: () => ({ status: 'idle' }) },
+        },
+      });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx, { defer: { budgetMs: 500, maxSlices: 4 } });
+      const stream = t.sc.follow({ maxMessages: 500, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      assert.equal((await stream.next()).value.type, 'snapshot');
+      // The deferral is pending now; tearing the plugin down must release it.
+      const next = stream.next();
+      t.dispose();
+      const settled = await Promise.race([
+        next.then((step) => step.done === true || step.value.type === 'event'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 2000)),
+      ]);
+      assert.notEqual(settled, 'timeout');
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+

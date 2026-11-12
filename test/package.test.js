@@ -221,3 +221,33 @@ test('config defaults the idle cache refresh to off and parses the switch', asyn
   // enables, matching the other switches in this repository.
   assert.equal(readConfig({ DSH_FASTLOAD_IDLE_CACHE_REFRESH: 'nonsense' }).idleCacheRefresh, true);
 });
+
+test('the deferred live build switch is documented in both READMEs', async () => {
+  const zh = await readFile(readmeZhUrl, 'utf8');
+  const en = await readFile(readmeEnUrl, 'utf8');
+  const rowOf = (source) =>
+    source.split('\n').find((line) => line.startsWith('| `DSH_FASTLOAD_DEFER_LIVE_BUILD`'));
+  const zhRow = rowOf(zh);
+  const enRow = rowOf(en);
+  assert.ok(zhRow, 'Chinese README documents DSH_FASTLOAD_DEFER_LIVE_BUILD');
+  assert.ok(enRow, 'English README documents DSH_FASTLOAD_DEFER_LIVE_BUILD');
+  assert.match(zhRow, /16 ms/);
+  assert.match(zhRow, /默认关闭/);
+  assert.match(zhRow, /docs\/design\.md/);
+  assert.match(enRow, /16 ms/);
+  assert.match(enRow, /off by default/i);
+  assert.match(enRow, /docs\/design\.md/);
+});
+
+test('config defaults the deferred live build to off and parses the switch', async () => {
+  const { DEFAULTS, readConfig } = await import('../src/config.js');
+  assert.equal(DEFAULTS.deferLiveBuild, false);
+  assert.equal(readConfig({}).deferLiveBuild, false);
+  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: '1' }).deferLiveBuild, true);
+  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: 'on' }).deferLiveBuild, true);
+  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: '0' }).deferLiveBuild, false);
+  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: 'off' }).deferLiveBuild, false);
+  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: 'no' }).deferLiveBuild, false);
+  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: '' }).deferLiveBuild, false);
+  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: 'nonsense' }).deferLiveBuild, true);
+});
