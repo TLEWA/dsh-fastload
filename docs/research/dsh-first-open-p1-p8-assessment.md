@@ -104,7 +104,8 @@ Chromium 网络帧时间（相对导航开始）：
 - 实现：客户端监听侧栏会话行（`[data-row-key^="session:"]`）的 `pointerover`/`focusin`，
   150 ms 后发起 `session.follow({ address, assistantStream: true, activate: false })`，
   取首帧后立即 `iterator.return()`。队列上限 4、串行执行、同一会话 10 分钟 TTL 去重、
-  指针移开取消、卸载时 abort；`localStorage['dsh-fastload.prewarm']='0'` 可关闭。
+  延迟窗口内指针移开取消、卸载时 abort，已在执行的预热跑完即止（只读）；
+  `localStorage['dsh-fastload.prewarm'] = '0'` 可关闭。
 - 数据（bench，冷进程、清空页缓存、同一会话）：
   - 262d33b1（6.0 MB 日志）：点击→首行 **337 ms → 110 ms**（预热 follow 233 ms 在 hover 等待内完成）。
   - 6e1e17af（rewind 会话，扩展页 736 条）：**253 ms → 174 ms**（预热 175 ms，命中页缓存 18 ms）。

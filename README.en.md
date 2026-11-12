@@ -52,9 +52,10 @@ the log files themselves are never modified.
   the web client issue a passive `session/follow` (`activate: false`) that builds
   the opening page and stores it in the page cache — no Agent activation, no
   session mutation. A real click then hits the cache. The queue holds at most 4
-  serialized jobs, one prewarm per session per 10 minutes, cancelled when the
-  pointer leaves; `localStorage['dsh-fastload.prewarm']='0'` or
-  `window.__DSH_FASTLOAD_PREWARM__=false` turns it off.
+  serialized jobs, one prewarm per session per 10 minutes; moving the pointer
+  within the 150 ms delay cancels it, while a prewarm already running is left to
+  finish (read-only, no activation). `localStorage['dsh-fastload.prewarm'] = '0'`
+  or `window.__DSH_FASTLOAD_PREWARM__ = false` turns it off.
 - Header index: `session/list` reuses the previously decoded header for session
   files whose size and mtime did not change, and coalesces repeated list requests
   within one boot. The index is written with a 1.5 s debounce and an atomic
