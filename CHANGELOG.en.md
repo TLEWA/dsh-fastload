@@ -24,6 +24,17 @@ All notable changes are documented here. Versions follow
   94,098 to 96,408 bytes, all of it switch scaffolding, comments and the DOM-first
   check in `watchEmpty`; runtime registrations shrink. Script execution time for
   the first navigation was not measured in a real browser.
+- **Idle page-cache refresh (stage 3, host half, off by default).** About 4 seconds
+  after a session goes quiet, the host runs the existing build/trim flow through a
+  read-only `session.follow({ activate: false })` and publishes the opening page
+  into the P5 page cache. It reads `sessionPersistence.stat` before and after the
+  build and drops the page when the revision moved, so an old page is never stored
+  under a new revision. One job per session and one build globally; work is
+  deferred while the Agent is running or the Host event loop lags. Refresh requests
+  carry an internal mark, bypass the page cache and do not count as hits; the flow
+  never activates the Agent, writes the session store or modifies original logs.
+  Enable with `DSH_FASTLOAD_IDLE_CACHE_REFRESH=1`; real first-open gains were not
+  measured for this change.
 - **Predictive prewarm (P6, web client).** Hovering or focusing a sidebar session
   row for 150 ms issues `session/follow({ activate: false })` to build the opening
   page into the page cache; a real click then hits the cache. The passive read

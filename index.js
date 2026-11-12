@@ -20,6 +20,7 @@ import { planTrim } from './src/trim.js';
 import { planCompact } from './src/compact.js';
 import { installScanCache } from './src/scan-cache.js';
 import { createPageCache } from './src/page-cache.js';
+import { createCacheRefresh } from './src/cache-refresh.js';
 import { createServeLog } from './src/serve-log.js';
 import { findRewindCuts, earliestCut, firstSeqOf, hiddenByCuts } from './src/rewind.js';
 
@@ -30,6 +31,14 @@ export const name = 'dsh-fastload';
 // through a stubbed session controller.
 export { wrapPageCache };
 export const inject = ['sessionController'];
+
+/**
+ * Marks the requests the idle refresher issues through the plugin's own wrapper.
+ * The wrapper refuses to serve them from the page cache: a refresh build must
+ * capture the live page, and a cache hit on that path would both skip the build
+ * and inflate the hit counters with reads no user made.
+ */
+const REFRESH_REQUEST = Symbol.for('dsh-fastload.refresh-request');
 
 /** Cache directory shared by the session-header index and the page cache. */
 function resolveCacheDir(config) {
@@ -396,6 +405,7 @@ function reuseState() {
     pageCacheHits: 0,
     pageCacheDropped: 0,
     rewindExtends: 0,
+    idleRefresh: null,
     error: null,
   };
   globalThis.__DSH_FASTLOAD__ = state;
@@ -411,9 +421,16 @@ function installTarget(service) {
   return (service && service[CORDIS_ORIGINAL]) || service;
 }
 
-export function apply(ctx) {
+/**
+ * @param {object} ctx cordis context
+ * @param {object} [options] test seam only ({refresh: {timings, timers,
+ *   probeLoad, now}}); the Host never passes a second argument.
+ */
+export function apply(ctx, options) {
   const config = readConfig(process.env);
+  const refreshOptions = options && options.refresh ? options.refresh : null;
   const state = reuseState();
+  if (state.installed !== true) state.idleRefresh = null;
   state.config = config;
   state.installed = false;
   state.error = null;
@@ -427,7 +444,8 @@ export function apply(ctx) {
     ', client auto-fill=on, scan cache=' + (config.scanCache ? 'on' : 'off') +
     ', page cache=' + (config.pageCache ? 'on' : 'off') +
     ', rewind=' + (config.rewindAware ? 'aware' : 'plain') +
-    ', replay streams=' + (config.stripStream ? 'stripped' : 'kept');
+    ', replay streams=' + (config.stripStream ? 'stripped' : 'kept') +
+    ', idle refresh=' + (config.idleCacheRefresh ? 'on' : 'off');
   try {
     ctx.logger?.info?.(banner);
   } catch {}
@@ -462,10 +480,16 @@ export function apply(ctx) {
 
     // P5: persisted opening page, keyed by the persistence revision so it can
     // only ever serve the exact log it was built from.
+    // Shared by the page cache and the idle refresher: both key on the
+    // persistence revision, so both need the same service handle.
+    let persistence = null;
+    try {
+      persistence = typeof c.get === 'function' ? c.get('sessionPersistence') : undefined;
+    } catch {}
+
     let pageCache = null;
     if (config.pageCache) {
       try {
-        const persistence = typeof c.get === 'function' ? c.get('sessionPersistence') : undefined;
         if (persistence && typeof persistence.stat === 'function') {
           pageCache = createPageCache({
             persistence,
@@ -494,7 +518,6 @@ export function apply(ctx) {
     // header on each list call (and across restarts via a validated index).
     if (config.scanCache) {
       try {
-        const persistence = typeof c.get === 'function' ? c.get('sessionPersistence') : undefined;
         if (persistence) {
           const cache = installScanCache({
             persistence,
@@ -532,7 +555,9 @@ export function apply(ctx) {
       let active = true;
       const wrapped = function follow(request, signal) {
         if (!active) return original.call(this, request, signal);
+        const refreshing = request != null && request[REFRESH_REQUEST] === true;
         const next = { ...request };
+        if (refreshing) delete next[REFRESH_REQUEST];
         const initial = isInitialPage(next, config);
 
         if (initial) {
@@ -569,7 +594,10 @@ export function apply(ctx) {
             );
           } catch {}
         }
-        if (!initial || !pageCache || !sessionId) return streamed;
+        // A refresh build must reach the live history build and its capture
+        // must be the one the refresher verifies; serving it from the cache
+        // here would both skip that build and count a phantom hit.
+        if (!initial || !pageCache || !sessionId || refreshing) return streamed;
         return wrapPageCache(streamed, {
           cache: pageCache,
           sessionId,
@@ -584,7 +612,85 @@ export function apply(ctx) {
       target.__dshFastload = true;
       state.installed = true;
 
+      // Stage 3: while a Session is quiet, walk the same read path a client
+      // open takes — this wrapper, assistantStream on, activate off — and store
+      // the page under the persistence revision it was built from. Everything
+      // here is additive: a missing capability or a thrown error leaves the
+      // refresher inert and the open path untouched.
+      let releaseRefresh = () => {};
+      if (config.idleCacheRefresh) {
+        try {
+          const refresh = createCacheRefresh({
+            cache: pageCache,
+            persistence,
+            variant: pageVariant(
+              {
+                maxMessages: config.maxMessages,
+                turnWindow: { minMessages: config.minMessages, minTurns: config.minTurns },
+                assistantStream: true,
+              },
+              config
+            ),
+            follow(request, signal) {
+              if (!active) {
+                throw new Error('dsh-fastload: sessionController.follow wrapper is retired');
+              }
+              return wrapped.call(target, request, signal);
+            },
+            tag(request) {
+              request[REFRESH_REQUEST] = true;
+            },
+            log: serveLog,
+            logger: ctx.logger,
+            debug: config.debug,
+            timings: refreshOptions ? refreshOptions.timings : undefined,
+            timers: refreshOptions ? refreshOptions.timers : undefined,
+            probeLoad: refreshOptions ? refreshOptions.probeLoad : undefined,
+            now: refreshOptions ? refreshOptions.now : undefined,
+          });
+          state.idleRefresh = refresh.report;
+          const offs = [];
+          releaseRefresh = () => {
+            for (const off of offs) {
+              if (typeof off !== 'function') continue;
+              try {
+                off();
+              } catch {}
+            }
+            refresh.dispose();
+          };
+          const listen = typeof ctx.on === 'function'
+            ? ctx.on.bind(ctx)
+            : typeof c.on === 'function' ? c.on.bind(c) : null;
+          if (refresh.report.active && !listen) {
+            refresh.dispose();
+            state.idleRefresh = { ...refresh.report, disabledReason: 'cordis event api unavailable' };
+          } else if (refresh.report.active) {
+            offs.push(listen('session/event', (session) => {
+              if (session && typeof session.id === 'string') refresh.noteActivity(session.id);
+            }, { global: true }));
+            offs.push(listen('agent/status', (payload) => {
+              const agent = payload && payload.agent;
+              if (!agent || typeof agent.id !== 'string') return;
+              refresh.noteAgentStatus(agent.id, typeof payload.status === 'string' ? payload.status : '');
+            }, { global: true }));
+            offs.push(listen('session/disposed', (session) => {
+              if (session && typeof session.id === 'string') refresh.noteDisposed(session.id);
+            }, { global: true }));
+          }
+        } catch (error) {
+          state.idleRefresh = {
+            active: false,
+            disabledReason: String((error && error.message) || error),
+          };
+          if (config.debug) process.stderr.write('[fl] idle refresh error: ' + error + '\n');
+        }
+      }
+
       return () => {
+        try {
+          releaseRefresh();
+        } catch {}
         if (target.follow === wrapped) {
           if (ownDescriptor) Object.defineProperty(target, 'follow', ownDescriptor);
           else delete target.follow;

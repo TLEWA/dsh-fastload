@@ -9,6 +9,7 @@ export const DEFAULTS = Object.freeze({
   scanCache: true,
   stripStream: true,
   pageCache: true,
+  idleCacheRefresh: false,
   rewindAware: true,
   pageCacheMaxBytes: 96 * 1024 * 1024,
   pageCacheMaxFiles: 400,
@@ -56,6 +57,7 @@ export function readConfig(env = process.env) {
     scanCache: readBool(env, 'DSH_FASTLOAD_SCAN_CACHE', DEFAULTS.scanCache),
     stripStream: readBool(env, 'DSH_FASTLOAD_STRIP_STREAM', DEFAULTS.stripStream),
     pageCache: readBool(env, 'DSH_FASTLOAD_PAGE_CACHE', DEFAULTS.pageCache),
+    idleCacheRefresh: readBool(env, 'DSH_FASTLOAD_IDLE_CACHE_REFRESH', DEFAULTS.idleCacheRefresh),
     pageCacheMaxBytes: readInt(
       env,
       'DSH_FASTLOAD_PAGE_CACHE_BYTES',

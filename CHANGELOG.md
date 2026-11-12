@@ -20,6 +20,13 @@
   打开 `dsh-fastload.debug`。`client.js` 源码 1916 → 1962 行、94,098 → 96,408 字节，
   增量来自开关、注释与 `watchEmpty` 的 DOM 先行判定，运行时注册量下降。首次导航
   脚本执行耗时未在真实浏览器中测量。
+- **空闲页缓存预热（阶段 3，Host 端，默认关闭）。** 会话静默约 4 秒后，宿主用只读
+  `session/follow({ activate: false })` 复用现有建页/裁剪流程，把首屏写入 P5 页缓存。
+  构建前后各读一次 `sessionPersistence.stat` 的 revision，不一致就丢弃重建，避免把旧页
+  发布到新 revision；同一 session 去重、全局并发 1，Agent 忙碌或 Host 事件循环延迟时推迟。
+  刷新请求带内部标记，不经过页缓存服务、不计入缓存命中；不激活 Agent、不写 session
+  store、不改原始日志。用 `DSH_FASTLOAD_IDLE_CACHE_REFRESH=1` 开启；真实首开收益本次
+  未执行测量。
 - **会话预测性预加载（P6，Web 端）。** 鼠标悬停或键盘聚焦侧栏会话行 150 ms 后，
   客户端用 `session/follow({ activate: false })` 预建首屏页并落页缓存；真实点击
   直接命中缓存。被动读取不会激活 Agent、不写会话；队列最多 4 个、串行执行，

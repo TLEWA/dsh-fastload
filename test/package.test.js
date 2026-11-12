@@ -182,3 +182,42 @@ test('READMEs scope DSH_FASTLOAD_ENABLED=0 to the host half', async () => {
   assert.match(enRow, /Host/);
   assert.match(enRow, /Web client/);
 });
+
+test('the package ships the host sources and keeps client inject empty', async () => {
+  const pkg = JSON.parse(await readFile(pkgUrl, 'utf8'));
+  assert.ok(pkg.files.includes('index.js'));
+  assert.ok(pkg.files.includes('src'));
+  assert.ok(pkg.files.includes('docs'));
+  assert.deepEqual(pkg.dsh.client.inject, []);
+  assert.equal(pkg.engines.dsh, '>=0.2.0-rc.1');
+});
+
+test('the idle cache refresh switch is documented in both READMEs', async () => {
+  const zh = await readFile(readmeZhUrl, 'utf8');
+  const en = await readFile(readmeEnUrl, 'utf8');
+  const rowOf = (source) =>
+    source.split('\n').find((line) => line.startsWith('| `DSH_FASTLOAD_IDLE_CACHE_REFRESH`'));
+  const zhRow = rowOf(zh);
+  const enRow = rowOf(en);
+  assert.ok(zhRow, 'Chinese README documents DSH_FASTLOAD_IDLE_CACHE_REFRESH');
+  assert.ok(enRow, 'English README documents DSH_FASTLOAD_IDLE_CACHE_REFRESH');
+  assert.match(zhRow, /空闲/);
+  assert.match(zhRow, /只读/);
+  assert.match(zhRow, /revision/i);
+  assert.match(enRow, /idle/i);
+  assert.match(enRow, /read-only/i);
+  assert.match(enRow, /revision/i);
+});
+
+test('config defaults the idle cache refresh to off and parses the switch', async () => {
+  const { DEFAULTS, readConfig } = await import('../src/config.js');
+  assert.equal(DEFAULTS.idleCacheRefresh, false);
+  assert.equal(readConfig({}).idleCacheRefresh, false);
+  assert.equal(readConfig({ DSH_FASTLOAD_IDLE_CACHE_REFRESH: '1' }).idleCacheRefresh, true);
+  assert.equal(readConfig({ DSH_FASTLOAD_IDLE_CACHE_REFRESH: 'on' }).idleCacheRefresh, true);
+  assert.equal(readConfig({ DSH_FASTLOAD_IDLE_CACHE_REFRESH: '0' }).idleCacheRefresh, false);
+  assert.equal(readConfig({ DSH_FASTLOAD_IDLE_CACHE_REFRESH: 'off' }).idleCacheRefresh, false);
+  // readBool only treats the documented false words as off; everything else
+  // enables, matching the other switches in this repository.
+  assert.equal(readConfig({ DSH_FASTLOAD_IDLE_CACHE_REFRESH: 'nonsense' }).idleCacheRefresh, true);
+});

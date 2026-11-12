@@ -91,6 +91,7 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_SCAN_CACHE` | `1` | 会话头索引与列表 TTL memo；`0` 恢复每次全量读 header。 |
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | 首帧剥离回放用的 `data.stream`。 |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | 持久化首屏快照。 |
+| `DSH_FASTLOAD_IDLE_CACHE_REFRESH` | `0` | 空闲时用只读 follow（`activate: false`）预热页缓存；不写 session store、不改原始日志，构建前后校验 `revision`。 |
 | `DSH_FASTLOAD_REWIND_AWARE` | `1` | 初始页被 `/rewind` 全部隐藏时向前扩一页。 |
 | `DSH_FASTLOAD_SERVE_LOG` | `1` | 在缓存目录写 `serve.log`（每次 follow 一行，512 KiB 轮转）。 |
 | `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | 页缓存总量上限（96 MiB，下限 1 MiB）。 |

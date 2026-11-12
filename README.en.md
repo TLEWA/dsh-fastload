@@ -115,6 +115,7 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_SCAN_CACHE` | `1` | Session-header index and list TTL memo; `0` re-reads every header. |
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | Strip replay `data.stream` from the first frame. |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | Persist the opening page. |
+| `DSH_FASTLOAD_IDLE_CACHE_REFRESH` | `0` | Warm the page cache during idle windows with a read-only follow (`activate: false`); never writes the session store or original logs, and checks the `revision` before and after building. |
 | `DSH_FASTLOAD_REWIND_AWARE` | `1` | Prepend one page when rewinds hide the whole initial page. |
 | `DSH_FASTLOAD_SERVE_LOG` | `1` | Write `serve.log` in the cache directory (one line per follow, 512 KiB rotation). |
 | `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | Total cache budget (96 MiB; minimum 1 MiB). |
