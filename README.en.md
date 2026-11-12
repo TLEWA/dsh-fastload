@@ -68,6 +68,14 @@ the log files themselves are never modified.
   successful warm is not repeated within 60 s in the same tab. It shares the
   hover queue and 10-minute TTL but is **off by default**: one extra opening-page
   read on every load is only worth it when explicitly enabled.
+- Diagnostics layering: Fiber sampling, assembler/Builder probes, deep
+  conversation/session snapshots, console wrapping and the 7 delay timers used
+  only for instrumentation are all off by default, and `window.__DSH_FASTLOAD__`
+  is not mounted. Open `localStorage['dsh-fastload.diagnostics'] = '1'` (or
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`) to collect evidence; the
+  prototype patching probe also needs `dsh-fastload.debug`. Turning diagnostics
+  off does not change the fill, blank healing, error recovery or either prewarm
+  path.
 - Header index: `session/list` reuses the previously decoded header for session
   files whose size and mtime did not change, and coalesces repeated list requests
   within one boot. The index is written with a 1.5 s debounce and an atomic
@@ -114,8 +122,8 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_CACHE_DIR` | empty | Cache directory; empty means `$DSH_HOME/cache/dsh-fastload`. |
 | `DSH_FASTLOAD_DEBUG` | `0` | Log each trim through the DSH logger. |
 
-The web half has two switches that are not environment variables, with opposite
-polarities:
+The web half has three switches that are not environment variables; the first
+two have opposite polarities:
 
 - `localStorage['dsh-fastload.prewarm'] = '0'` (or
   `window.__DSH_FASTLOAD_PREWARM__ = false`) disables hover predictive prewarm;
@@ -124,6 +132,14 @@ polarities:
   `window.__DSH_FASTLOAD_RESTORE_PREWARM__ = true`) enables startup prewarm; it is
   **off by default**. A missing key, an empty value or any string other than
   `'1'` leaves it off.
+- `localStorage['dsh-fastload.diagnostics'] = '1'` (or
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`) enables the web diagnostics
+  layer; it is **off by default**. When off, no React Fiber traversal, no deep
+  object snapshots, no retained error log array, no `console.error` wrapper and
+  no diagnostics-only pollers or timers are installed. The fill, blank healing,
+  error recovery, both prewarm paths and their rhythm constants are unchanged.
+  The prototype `instrument` probe needs both diagnostics and
+  `dsh-fastload.debug`.
 
 ### Install
 

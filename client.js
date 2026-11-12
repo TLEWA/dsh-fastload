@@ -17,12 +17,13 @@
  * scrolls, the newest content is already at the bottom and adding older rows
  * would only cost work without changing what the user sees.
  *
- * Diagnostics: the module keeps a small ring buffer of uncaught errors,
- * unhandled rejections and console.error calls, so a transcript that renders
- * empty can be explained afterwards. `window.__DSH_FASTLOAD__.probe()` returns
- * the whole picture (flow geometry, slot-error boundaries, scroll box, buffered
- * errors) and copies it to the clipboard; the buffer is also printed once when
- * an empty transcript with "Load older" is detected.
+ * Diagnostics are opt-in (stage 6): fiber walks, assembler/builder snapshots,
+ * flush logs, the console wrapper and the per-scan sampler only run when
+ * localStorage 'dsh-fastload.diagnostics' = '1' or
+ * window.__DSH_FASTLOAD_DIAGNOSTICS__ = true. With the switch off the module
+ * still fills a short first page, still heals a blank transcript and still
+ * prewarms, but it keeps no forensic buffers and registers no diagnostic
+ * timers. `window.__DSH_FASTLOAD__.probe()` exists only on that opt-in path.
  */
 
 (() => {
@@ -44,7 +45,7 @@
   // Every served module instance stamps its build id into the probe payload:
   // two instances of this client can coexist while a page is being rebuilt,
   // and a stale one would answer the probe with old logic.
-  const BUILD = 'v19';
+  const BUILD = 'v20';
 // Instrumentation patches hot paths (assembler flush, chat builder replace),
 // so it stays off unless explicitly asked for: localStorage
 // 'dsh-fastload.debug' = '1', or window.__DSH_FASTLOAD_DEBUG__ = true.
@@ -55,6 +56,23 @@ const DEBUG = (() => {
     return false;
   }
 })();
+// Stage 6: the forensic layer is opt-in, so the default client stays a pager
+// plus a bounded recovery path. Everything under "diagnostics" below (fiber
+// probes, deep assembler/builder snapshots, flush/build logs, the console
+// wrapper, the per-scan sampler, window.__DSH_FASTLOAD__) is registered or
+// materialised only when this switch is on. Same dual shape as every other
+// switch in this file: localStorage first, then a window flag for tests.
+const DIAG_KEY = 'dsh-fastload.diagnostics';
+const DIAG = (() => {
+  try {
+    return localStorage.getItem(DIAG_KEY) === '1' || window.__DSH_FASTLOAD_DIAGNOSTICS__ === true;
+  } catch {
+    return false;
+  }
+})();
+// Patching shared prototypes is more invasive than reading them, so the older
+// debug switch keeps its own meaning: instrumentation = DEBUG on top of DIAG.
+const INSTRUMENT = DIAG && DEBUG;
   // A blank transcript can repair itself (the window may be installed a moment
   // after the first frame), so the probe keeps a rolling timeline of what the
   // flow was handed: a sample taken after recovery still shows whether rows
@@ -523,6 +541,7 @@ const DEBUG = (() => {
             // ---- diagnostics -------------------------------------------------
             const buffer = [];
             const remember = (kind, value) => {
+              if (!DIAG) return;
               let text;
               try {
                 text = typeof value === 'string' ? value : value && value.stack ? value.stack : JSON.stringify(value);
@@ -541,17 +560,19 @@ const DEBUG = (() => {
               const reason = event && event.reason;
               remember('rejection', (reason && (reason.stack || reason.message)) || reason || 'rejection');
             };
-            window.addEventListener('error', onError);
-            window.addEventListener('unhandledrejection', onRejection);
-
             const originalError = console.error;
-            const quietError = (...args) => {
-              try {
-                remember('console', args.map((arg) => (arg && arg.stack ? arg.stack : arg)).join(' '));
-              } catch {}
-              return originalError.apply(console, args);
-            };
-            console.error = quietError;
+            let quietError = null;
+            if (DIAG) {
+              window.addEventListener('error', onError);
+              window.addEventListener('unhandledrejection', onRejection);
+              quietError = (...args) => {
+                try {
+                  remember('console', args.map((arg) => (arg && arg.stack ? arg.stack : arg)).join(' '));
+                } catch {}
+                return originalError.apply(console, args);
+              };
+              console.error = quietError;
+            }
 
             const rectOf = (node) => {
               const rect = node.getBoundingClientRect();
@@ -704,6 +725,7 @@ const DEBUG = (() => {
             // One line per scan: what the mounted flow was handed and what the
             // user could see, so a later probe can replay the first seconds.
             const flowSample = () => {
+              if (!DIAG) return;
               const flow = document.querySelector('[data-chat-flow]:not([data-step-process-content])');
               const slot = flow ? flowSlotOf(flow) : null;
               const scroll = flow ? scrollParentOf(flow) : null;
@@ -1122,7 +1144,7 @@ const DEBUG = (() => {
               } catch {}
               state.healed += 1;
               state.blank = payload;
-              const before = conversationProbe(true);
+              const before = conversationProbe(DIAG);
               // A window that carries an executed rewind is not broken: walk
               // back instead of re-publishing the same all-hidden order.
               if (windowRewound()) {
@@ -1145,7 +1167,7 @@ const DEBUG = (() => {
                   blankHandled.delete(flow);
                   return;
                 }
-                const after = conversationProbe(true);
+                const after = conversationProbe(DIAG);
                 state.heal = { action: 'rebuild-failed', entries: entries === null ? null : entries.length, after };
                 captureStuck('blank-grace/rebuild-failed', after);
               }, 900);
@@ -1445,9 +1467,9 @@ const DEBUG = (() => {
                 healBlankMarkers();
                 return true;
               }
-              captureStuck(why, conversationProbe(true));
+              captureStuck(why, conversationProbe(DIAG));
               const reactivated = reactivateChat();
-              const after = conversationProbe(true);
+              const after = conversationProbe(DIAG);
               state.heal = {
                 action: reactivated ? 'reactivated' : 'stuck',
                 at: Math.round(performance.now()),
@@ -1467,6 +1489,7 @@ const DEBUG = (() => {
             // Keep the pre-repair assembler state; a later successful repair
             // must not erase the only evidence of what broke.
             const captureStuck = (why, conversation) => {
+              if (!DIAG) return;
               try {
                 const payload = {
                   at: new Date().toISOString(),
@@ -1570,7 +1593,7 @@ const DEBUG = (() => {
                 at: Math.round(now),
                 why,
                 count: rec.rebuilds,
-                before: conversationProbe(true),
+                before: conversationProbe(DIAG),
               };
               if (rebuilt) {
                 healBlankMarkers();
@@ -1584,7 +1607,7 @@ const DEBUG = (() => {
                 }, 400);
                 timers.add(timer);
               } else {
-                captureStuck(why + '/rebuild-unavailable', conversationProbe(true));
+                captureStuck(why + '/rebuild-unavailable', conversationProbe(DIAG));
               }
               return rebuilt;
             };
@@ -1725,6 +1748,7 @@ const DEBUG = (() => {
             };
 
             const publish = (payload) => {
+              if (!DIAG) return;
               try {
                 window.__DSH_FASTLOAD__.last = payload;
               } catch {}
@@ -1740,7 +1764,8 @@ const DEBUG = (() => {
               } catch {}
             };
 
-            window.__DSH_FASTLOAD__ = {
+            // The diagnostic surface is materialised only on the opt-in path.
+            const diagnosticsApi = {
               probe,
               publish,
               rebuild: rebuildConversation,
@@ -1792,15 +1817,20 @@ const DEBUG = (() => {
               deep: () => conversationProbe(true),
               last: null,
             };
+            if (DIAG) window.__DSH_FASTLOAD__ = diagnosticsApi;
 
-            for (const delay of [0, 40, 110, 250, 500, 900, 1500]) {
-              const timer = setTimeout(() => {
-                timers.delete(timer);
-                if (!DEBUG) return;
-                instrumentFlush();
-                instrumentBuilder();
-              }, delay);
-              timers.add(timer);
+            // Prototype instrumentation retries until the assembler/builder
+            // prototypes exist. It is the most invasive layer, so it needs both
+            // switches; with them off no timer is registered at all.
+            if (INSTRUMENT) {
+              for (const delay of [0, 40, 110, 250, 500, 900, 1500]) {
+                const timer = setTimeout(() => {
+                  timers.delete(timer);
+                  instrumentFlush();
+                  instrumentBuilder();
+                }, delay);
+                timers.add(timer);
+              }
             }
 
             // An open transcript with a "Load older" button but no rendered
@@ -1813,11 +1843,20 @@ const DEBUG = (() => {
               // A page button is the marker of an installed window: without it
               // an empty transcript is a legitimately empty session.
               if (olderButtonOf(flow) === null) return;
+              // Cheap DOM first: only a slot that already looks blank is worth
+              // a fiber walk. The old order walked the fiber tree on every scan
+              // of every mounted transcript, which was pure overhead when rows
+              // were rendered normally.
+              const domBlank = slot.getBoundingClientRect().height <= 1 && (slot.innerText || '').trim() === '';
+              if (!domBlank) {
+                blankFirstSeen.delete(flow);
+                return;
+              }
+              // On this (rare) path the fiber stays the tie-breaker: rows handed
+              // to the slot but not painted yet are not a broken window, and
+              // rebuilding them would be the wrong repair.
               const entries = entriesOf(flow);
-              const empty = entries !== null
-                ? entries.length === 0
-                : slot.getBoundingClientRect().height <= 1 && (slot.innerText || '').trim() === '';
-              if (!empty) {
+              if (entries !== null && entries.length > 0) {
                 blankFirstSeen.delete(flow);
                 return;
               }
@@ -1831,8 +1870,11 @@ const DEBUG = (() => {
               blankHandled.add(flow);
               blankFirstSeen.delete(flow);
               flow.setAttribute('data-fastload-blank', '');
-              const payload = probe();
-              publish(payload);
+              let payload = null;
+              if (DIAG) {
+                payload = probe();
+                publish(payload);
+              }
               try {
                 originalError('[dsh-fastload] empty transcript with a page button', payload);
               } catch {}
@@ -1841,13 +1883,15 @@ const DEBUG = (() => {
 
             const scan = () => {
               state.scans += 1;
-              try {
-                flowSample();
-              } catch {}
+              if (DIAG) {
+                try {
+                  flowSample();
+                } catch {}
+              }
               try {
                 ensureGuard();
                 staleResync(currentSessionId());
-                if (DEBUG) {
+                if (INSTRUMENT) {
                   instrumentFlush();
                   instrumentBuilder();
                 }
@@ -1904,9 +1948,11 @@ const DEBUG = (() => {
               for (const type of inputEvents) {
                 document.removeEventListener(type, noteInput, { capture: true });
               }
-              window.removeEventListener('error', onError);
-              window.removeEventListener('unhandledrejection', onRejection);
-              if (console.error === quietError) console.error = originalError;
+              if (DIAG) {
+                window.removeEventListener('error', onError);
+                window.removeEventListener('unhandledrejection', onRejection);
+              }
+              if (quietError !== null && console.error === quietError) console.error = originalError;
             };
           });
         },

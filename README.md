@@ -53,6 +53,11 @@ firstAnchor 看起来很快，实际上是一个空页。
   发起的只读流，正式打开的流不会被中断。成功后同一标签页 60 秒内不重复预热。
   与悬停预加载共用串行队列和 10 分钟 TTL，但**默认关闭**：每次页面加载多一次
   首屏读取，只有显式开启才值得。
+- 诊断分层：Fiber 采样、assembler/Builder 探针、conversation/session 深度快照、
+  console 包装和 7 个仅用于埋点的延时器默认全部不运行，`window.__DSH_FASTLOAD__`
+  也不挂载。需要取证时打开 `localStorage['dsh-fastload.diagnostics'] = '1'`（或
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`）；原型 patch 还要叠加
+  `dsh-fastload.debug`。关闭诊断不改变补页、空白自愈、错误恢复和两种预热。
 - 会话头索引：`session/list` 对未变化的会话文件直接复用上次解析出的 header，
   并把一次启动内的重复列表请求合成一次；索引写入 1.5 秒防抖、原子替换，
   文件大小或 mtime 变了自然失效。
@@ -93,13 +98,19 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_CACHE_DIR` | 空 | 缓存目录；空表示 `$DSH_HOME/cache/dsh-fastload`。 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条 DSH 日志。 |
 
-Web 端还有两个不进环境变量的开关，极性相反，别写反：
+Web 端还有三个不进环境变量的开关；前两个极性相反，别写反：
 
 - `localStorage['dsh-fastload.prewarm'] = '0'`（或
   `window.__DSH_FASTLOAD_PREWARM__ = false`）关闭会话悬停预测性预加载，**默认开启**。
 - `localStorage['dsh-fastload.restore-prewarm'] = '1'`（或
   `window.__DSH_FASTLOAD_RESTORE_PREWARM__ = true`）开启启动预热，**默认关闭**。
   缺省、空值或任何非 `'1'` 的字符串都不会开启它。
+- `localStorage['dsh-fastload.diagnostics'] = '1'`（或
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`）开启 Web 端诊断取证层，**默认关闭**。
+  关闭时不遍历 React Fiber、不做深度对象快照、不保留错误日志数组、不包装
+  `console.error`、不注册仅诊断用的轮询和延时器；补页、自愈、错误恢复与 P6/启动
+  预热的行为和节奏常量都不变。原型 `instrument` 探针需要诊断与 `dsh-fastload.debug`
+  同时开启。
 
 ### 安装
 

@@ -121,6 +121,48 @@ polarity from the hover switch, which is on unless explicitly disabled.
 is asserted textually in `test/package.test.js`. No real-browser benchmark has
 been run for this stage yet.
 
+## Core and diagnostics layering (stage 6)
+
+The web client has two layers. The core layer is what the plugin promises: the
+single background fill, blank-transcript detection and healing, the guarded
+rebuild/reactivate path, stale resync, P6 hover prewarm, the stage-2 startup
+warm, and the disposer that removes every timer, interval and listener. The
+diagnostics layer explains a failure: fiber walks, deep
+conversation/assembler/builder snapshots, flush/build prototype patches, the
+per-scan sample ring, the uncaught-error and `console.error` buffers, and the
+`window.__DSH_FASTLOAD__` probe API.
+
+Only the core runs by default. The diagnostics layer is materialised when
+`localStorage['dsh-fastload.diagnostics'] === '1'` or
+`window.__DSH_FASTLOAD_DIAGNOSTICS__ === true`. Prototype patching stays behind
+a second switch (`dsh-fastload.debug`), so instrumentation needs both DIAG and
+DEBUG while the read-only probes need DIAG alone. When off there is no fiber
+traversal except the two correctness reads below, no deep snapshot, no retained
+log array, no console wrapper, no diagnostics timer and no global probe object.
+
+One fiber read stays on the core path: `entriesOf()` is the tie-breaker when
+the DOM slot already looks blank, because "no rows were delivered" and "rows
+were delivered but not painted" need different repairs. `watchEmpty()` now
+checks slot geometry and text first, so the fiber walk only happens on the rare
+blank path instead of on every 500 ms scan of every mounted transcript; the
+same read verifies the heal 900 ms after a rebuild.
+
+There is no separate diagnostics file. `dsh-client-modules` loads exactly one
+`client.js` per plugin id, and the factory's `require` resolves only registered
+module ids, so a relative `require('./src/client-diagnostics.js')` would fail
+and there is no build step to bundle it. The layer is separated by function
+boundaries and the `DIAG` guard inside the single IIFE, and the contract test
+asserts that shape.
+
+The default-path registration counts were measured with a Node `vm` stub
+harness (not a browser). On first navigation the default path registers 1
+`setTimeout` (the 0 ms startup-warm starter, which returns immediately while
+its switch is off), 1 interval (the 500 ms scan) and 7 document listeners.
+Before stage 6 the same path registered 8 timeouts and 9 listeners and wrapped
+`console.error`. With diagnostics and debug on, the counts return to 8/1/9 and
+the prototypes are patched; the disposer still clears all of them (8
+`clearTimeout`, 1 `clearInterval`, 9 `removeEventListener`, console restored).
+
 ## What is intentionally absent
 
 - No DOM virtualization: that is a separate, larger change; this plugin only

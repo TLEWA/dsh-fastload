@@ -9,6 +9,21 @@ All notable changes are documented here. Versions follow
 
 ### Added
 
+- **Core/diagnostics split in the web client (stage 6).** The default path no longer
+  walks React fibers for sampling, keeps no error/rejection/flush/build log arrays,
+  does not wrap `console.error`, does not mount `window.__DSH_FASTLOAD__`, and
+  registers none of the 7 instrumentation-only timers. On first navigation the
+  measured registrations drop from 8 `setTimeout`s to 1 and from 9 listeners to 7
+  (only the 7 document listeners used by P6 and the input-idle check remain). The
+  fill, Load older anchor compensation, `/rewind` blank healing, error recovery,
+  P6 and startup prewarm keep their behaviour and rhythm constants
+  (900/700/8/1500 ms). Diagnostics are opt-in and **off by default** via
+  `localStorage['dsh-fastload.diagnostics'] = '1'` or
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`; the prototype patching probe also
+  needs `dsh-fastload.debug`. `client.js` grows from 1916 to 1962 lines and from
+  94,098 to 96,408 bytes, all of it switch scaffolding, comments and the DOM-first
+  check in `watchEmpty`; runtime registrations shrink. Script execution time for
+  the first navigation was not measured in a real browser.
 - **Predictive prewarm (P6, web client).** Hovering or focusing a sidebar session
   row for 150 ms issues `session/follow({ activate: false })` to build the opening
   page into the page cache; a real click then hits the cache. The passive read

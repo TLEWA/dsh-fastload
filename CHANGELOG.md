@@ -9,6 +9,17 @@
 
 ### 新增
 
+- **客户端核心/诊断分层（阶段 6，Web 端）。** 默认路径不再遍历 React Fiber 采样、
+  不保留错误/拒绝/flush/build 日志数组、不包装 `console.error`、不挂载
+  `window.__DSH_FASTLOAD__`，也不注册 7 个仅用于 instrument 的延时器。首次导航
+  实测注册的 `setTimeout` 8 → 1、事件监听 9 → 7（只保留 P6 与输入空闲所需的 7 个
+  document 监听）。补页、Load older 锚点补偿、`/rewind` 空白自愈、错误恢复、P6
+  与启动预热的行为和节奏常量（900/700/8/1500 ms）都不变。诊断开关为
+  `localStorage['dsh-fastload.diagnostics'] = '1'` 或
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`，**默认关闭**；原型 patch 还需同时
+  打开 `dsh-fastload.debug`。`client.js` 源码 1916 → 1962 行、94,098 → 96,408 字节，
+  增量来自开关、注释与 `watchEmpty` 的 DOM 先行判定，运行时注册量下降。首次导航
+  脚本执行耗时未在真实浏览器中测量。
 - **会话预测性预加载（P6，Web 端）。** 鼠标悬停或键盘聚焦侧栏会话行 150 ms 后，
   客户端用 `session/follow({ activate: false })` 预建首屏页并落页缓存；真实点击
   直接命中缓存。被动读取不会激活 Agent、不写会话；队列最多 4 个、串行执行，

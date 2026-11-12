@@ -24,6 +24,52 @@ test('client registers a module and keeps the auto-fill contract', async () => {
 });
 
 
+test('the diagnostic layer is opt-in and silent on the default path', async () => {
+  const source = await readFile(clientUrl, 'utf8');
+  assert.match(source, /const DIAG_KEY = 'dsh-fastload\.diagnostics'/);
+  // Same dual shape as the other switches, and the window flag must be exactly
+  // true: a flag that merely exists (or a stale non-true value) must not turn
+  // forensics on.
+  assert.match(source, /localStorage\.getItem\(DIAG_KEY\) === '1'/);
+  assert.match(source, /window\.__DSH_FASTLOAD_DIAGNOSTICS__ === true/);
+  // The per-scan fiber sampler, the deep conversation/assembler snapshot, the
+  // console wrapper and the probe API all sit behind the switch.
+  assert.match(source, /if \(DIAG\) \{\s*try \{\s*flowSample\(\);/);
+  assert.match(source, /if \(DIAG\) \{\s*window\.addEventListener\('error', onError\);\s*window\.addEventListener\('unhandledrejection', onRejection\);/);
+  assert.match(source, /if \(DIAG\) window\.__DSH_FASTLOAD__ = diagnosticsApi;/);
+  assert.match(source, /const remember = \(kind, value\) => \{\s*if \(!DIAG\) return;/);
+  assert.match(source, /conversationProbe\(DIAG\)/);
+  // Prototype patches are more invasive than reads, so they still need the
+  // older debug switch on top of diagnostics.
+  assert.match(source, /const INSTRUMENT = DIAG && DEBUG;/);
+  assert.match(source, /if \(INSTRUMENT\) \{\s*for \(const delay of \[0, 40, 110, 250, 500, 900, 1500\]\)/);
+});
+
+test('the core paging rhythm and the unmount cleanup stay intact', async () => {
+  const source = await readFile(clientUrl, 'utf8');
+  const constant = (name) => {
+    const match = source.match(new RegExp(name + '\\s*=\\s*(\\d+)'));
+    assert.ok(match, name + ' is defined');
+    return Number(match[1]);
+  };
+  assert.equal(constant('AUTOLOAD_DELAY_MS'), 900);
+  assert.equal(constant('RETRY_MS'), 700);
+  assert.equal(constant('MAX_ATTEMPTS'), 8);
+  assert.equal(constant('INPUT_IDLE_MS'), 1500);
+  assert.match(source, /setInterval\(scan, 500\)/);
+  assert.match(source, /if \(DIAG\) \{\s*window\.addEventListener/);
+  // Unmount must clear the polling interval, every pending timer, and every
+  // listener this module added, including the diagnostic ones.
+  const start = source.indexOf('return () => {\n              disposed = true;');
+  assert.ok(start > 0, 'client returns a disposer');
+  const body = source.slice(start);
+  assert.match(body, /clearInterval\(interval\)/);
+  assert.match(body, /for \(const timer of timers\) clearTimeout\(timer\)/);
+  assert.match(body, /window\.removeEventListener\('error', onError\)/);
+  assert.match(body, /console\.error === quietError/);
+  assert.match(body, /restorePatches\(\)/);
+});
+
 test('the predictive prewarm stays a passive follow', async () => {
   const source = await readFile(clientUrl, 'utf8');
   // The web half needs the Remote session service to open a passive read.
@@ -110,6 +156,15 @@ test('READMEs document the startup warm as off by default', async () => {
   }
   assert.match(zh, /默认关闭/);
   assert.match(en, /off by default/i);
+});
+
+test('READMEs document the opt-in diagnostics switch', async () => {
+  const zh = await readFile(readmeZhUrl, 'utf8');
+  const en = await readFile(readmeEnUrl, 'utf8');
+  for (const [name, text] of [['zh', zh], ['en', en]]) {
+    assert.match(text, /dsh-fastload\.diagnostics/, name + ' documents the switch key');
+    assert.match(text, /__DSH_FASTLOAD_DIAGNOSTICS__/, name + ' documents the window override');
+  }
 });
 
 test('READMEs scope DSH_FASTLOAD_ENABLED=0 to the host half', async () => {

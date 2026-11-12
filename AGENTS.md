@@ -45,6 +45,12 @@
 - 保持现有节奏常量：首轮 900ms、重试 700ms、最多 8 次、输入空闲 1500ms；用
   `data-fastload-autoloaded` 去重；卸载时必须清理 interval、timer 和事件监听。
 - 客户端只在 web 平台加载；不要引入 DOM 虚拟化或缓存，这些是明确不做的范围。
+- 诊断层默认关闭：只有 `localStorage['dsh-fastload.diagnostics'] === '1'` 或
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ === true` 时才遍历 Fiber、做深度
+  conversation/assembler/Builder 快照、保留日志数组、包装 `console.error`、挂载
+  `window.__DSH_FASTLOAD__`、注册仅诊断用的 timer；原型 patch 还要同时打开
+  `dsh-fastload.debug`。诊断代码不得拆成第二个文件（每个包只加载一个 `client.js`），
+  用函数边界与同一个 disposer 隔离；关闭与开启两种状态下都必须清理干净。
 - 启动预热默认关闭且与悬停开关极性相反：仅
   `localStorage['dsh-fastload.restore-prewarm'] === '1'` 或
   `window.__DSH_FASTLOAD_RESTORE_PREWARM__ === true` 时运行。必须先从
