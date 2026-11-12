@@ -14,6 +14,36 @@ All notable changes are documented here. Versions follow
   never defers and shows no measurable benefit; only passive `activate:false` requests such
   as prewarm or restore wait for at most 16 ms. Set `DSH_FASTLOAD_DEFER_LIVE_BUILD=0` to
   restore the stage-3 ordering.
+- **Stage 4 revisit PoC: lazy folded groups (experimental, web, off by default).** Adds
+  `DSH_FASTLOAD_LAZY_GROUPS` (`localStorage['dsh-fastload.lazy-groups']='1'` or
+  `window.__DSH_FASTLOAD_LAZY_GROUPS__=true`). Only tool-call nodes inside finished collapsed
+  process groups become a plain-text placeholder; the group shell and anchors stay native.
+  Assistant steps, running groups, interleaved input, approvals and errors always use the
+  native `renderSlot`. The implementation reads the private
+  `ctx.slots.entries('conversation.chat.flow')` entry and temporarily replaces
+  `entry.component`; it falls back to stock when a capability is missing and restores the
+  original only while the entry still holds this plugin's wrapper. Warm-host alternating A/B
+  (n=6): standard normal click-to-first-row 481.6 to 428.6 ms (-11.0%), DOM 8598 to 4888;
+  long 265.9 to 237.0 ms (-10.9%), DOM 4114 to 2869; long first-row long task 142.5 to
+  118.5 ms, but a second ~39 ms Long Task appears after the first row (settled 142.5 to
+  181.5 ms), so total long-task time may increase. Per-preset matrix, pixel parity, anchor
+  and paging regressions are in `docs/research/stage4-revisit.md`; real `FindInPage`
+  was exercised: the structural reveal passes, but the active match/highlight/scroll are
+  lost and false positives/negatives exist. Node-local state preservation was not verified.
+  Off by default; a performance experiment only, not a Ctrl+F-compatible path.
+- **Stage 4 revisit control: progressive hydration (experimental, web, off by default, NO-GO
+  this round).** Adds `DSH_FASTLOAD_LAZY_PROGRESSIVE`
+  (`localStorage['dsh-fastload.lazy-progressive']='1'` or
+  `window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__=true`); progressive wins when both are on. The
+  first frame uses placeholders, then after two `requestAnimationFrame` callbacks it hydrates
+  native nodes in `requestIdleCallback` slices; a capture-phase Ctrl/Cmd+F handler uses
+  `flushSync` to hydrate everything first. First-open gain matches permanent (normal 576.9 to
+  513.8 ms, long 325.4 to 318.9 ms, n=6) and final DOM/text/scroll match stock; normal drains
+  in about 0.79-0.90 s, long in 0.13-0.19 s, with the longest first-open slice at 19.9 ms. On a
+  turn-rail jump into unloaded history, however, it drained for 12.9 s and produced 93 long
+  tasks of 69-110 ms versus stock's single 781 ms task. Under the background-long-task rule it
+  is **NO-GO**, kept only as a control.
+
 - **Stage 8 final integration, regression and release preparation (local branch, not
   released).** Merged the stage 2+3+6 integration head with the stage 5 deferred live build,
   the stage 0 baseline and the stage 4 CSS NO-GO report as `feat/optimization-final`. Of the

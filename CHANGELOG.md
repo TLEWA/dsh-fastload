@@ -14,6 +14,29 @@
   DSH 0.2.2-rc.1 的真实点击打开带 `activate=true`，因此点击路径不会延后，也没有可测
   收益；该开关只对预热、恢复等 `activate:false` 的被动请求最多延后 16 ms。设置
   `DSH_FASTLOAD_DEFER_LIVE_BUILD=0` 即恢复阶段 3 的时序。
+- **阶段 4 复审 PoC：折叠组懒挂载（实验，Web 端，默认关闭）。** 新增
+  `DSH_FASTLOAD_LAZY_GROUPS`（`localStorage['dsh-fastload.lazy-groups']='1'` 或
+  `window.__DSH_FASTLOAD_LAZY_GROUPS__=true`）。只把已完成折叠 process group 里的
+  tool-call 节点换成纯文本占位，group 外壳与锚点不变；assistant-step、运行中、交错输入、
+  待审批、异常一律走原生 `renderSlot`。实现读取私有
+  `ctx.slots.entries('conversation.chat.flow')` 并临时替换 `entry.component`，能力检测
+  失败就回退 stock，卸载时仅在仍为本插件 wrapper 时还原。warm host 交替 A/B（n=6）：
+  standard normal 点击→首行 481.6→428.6 ms（−11.0%）、DOM 8598→4888；long
+  265.9→237.0 ms（−10.9%）、DOM 4114→2869；long 首行长任务 142.5→118.5 ms，但首行后
+  多出约 39 ms 的第二个 Long Task（settled 142.5→181.5 ms），总长任务可能增加。
+  逐预设矩阵、像素等价、锚点与翻页回归见 `docs/research/stage4-revisit.md`；真实
+  `FindInPage` 已验证：结构性揭示通过，但活动匹配/高亮/滚动丢失，且存在误报/漏报。
+  节点局部状态保留未验证；默认关闭，仅作为性能实验，不能作为 Ctrl+F 兼容方案。
+- **阶段 4 复审对照：渐进补挂（实验，Web 端，默认关闭，本轮 NO-GO）。** 新增
+  `DSH_FASTLOAD_LAZY_PROGRESSIVE`（`localStorage['dsh-fastload.lazy-progressive']='1'`
+  或 `window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__=true`），两者同时开启时渐进优先。首帧
+  先占位，双 `requestAnimationFrame` 后用 `requestIdleCallback` 分片补回原生节点，
+  Ctrl/Cmd+F 捕获阶段用 `flushSync` 全量补回。normal/long 首开收益与永久占位同量级
+  （normal 576.9→513.8 ms，long 325.4→318.9 ms，n=6），最终 DOM/文本/滚动与 stock 一致；
+  normal 补挂约 0.79–0.90 s、long 约 0.13–0.19 s，首开分片最长 19.9 ms。但在 turn rail
+  跳转到未加载历史时补挂 12.9 s、产生 93 个 69–110 ms Long Task，同一场景 stock 只有
+  1 个 781 ms 任务，按后台长任务判 **NO-GO**，仅保留作对照。
+
 - **阶段 8 最终集成、回归与发布准备（本地分支，未发布）。** 把阶段 2+3+6 集成头与阶段 5
   延后构建、阶段 0 基线、阶段 4 CSS NO-GO 报告合并为 `feat/optimization-final`。13 个可执行
   回归场景中 12 通过、0 失败、1 未执行（子代理来源会话没有 workspace 行，侧栏不可达）；缓存

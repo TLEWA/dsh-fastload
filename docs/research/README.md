@@ -19,6 +19,12 @@ the exploratory workspace on 2026-11-09.
 - `plugin-optimization-final-report.md` — stage 8 final integration, 16-item
   regression matrix, all-off/all-on performance comparison, stage 7 decision,
   private-API risks and the unexecuted-test list.
+- `stage4-revisit.md` — stage-4 permanent placeholder experiment:
+  display/anchor/paging/expand parity, find-in-page verification, conditional GO
+  as off-by-default experiment, progressive NO-GO.
+- `stage4-find-verification.md` — real CDP FindInPage verification: structural
+  reveal PASS, active match/highlight/scroll FAIL, false positives/negatives,
+  coverage 47.62%/17.86% (strict) and 56.66%/37.44% (corrected).
 
 The documents contain machine-specific absolute paths from the test machine;
 they are retained for reproducibility, not as install instructions.
