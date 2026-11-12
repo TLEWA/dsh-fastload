@@ -7,6 +7,14 @@ All notable changes are documented here. Versions follow
 
 ## [Unreleased]
 
+### Fixed
+
+- **Closing a cache-hit stream no longer leaves the debug lag probe running.** With `DSH_FASTLOAD_DEBUG=1`, a client that reads only the cached frame and calls `return()` now stops the probe from the generator-wide `finally` (cached yield included), so the recursive `setImmediate` loop cannot keep spinning on the Host. Regression test: `closing after the cached frame stops the debug lag probe`.
+- **Restore prewarm subscribes before starting a follow.** `armRestoreSignal` installs the selection subscription first, re-checks that the stage is still `waiting`, and only then queues the prewarm; a thrown subscribe marks the prewarm failed without leaving a follow running. Regression test: `does not prewarm when the selection subscription throws`.
+- **A timed-out page-cache read closes its iterator with a bound.** `readOpening` now races `return()` against a 250 ms cleanup timer, releases the global inFlight slot afterwards, and still records the timeout as a failure. Regression test: `a timed-out opening releases the in-flight slot when return never settles`.
+- **The build re-checks Agent status after the settle and stat waits.** If the Agent started running meanwhile, the build skips the follow and reschedules. Regression test: `re-checks Agent status after the settle wait`.
+- **A failed idle-refresh registration releases installed listeners.** When `agent/status` or `session/disposed` registration throws, `releaseRefresh()` now runs immediately before the disabled state is published. Regression test: `releases idle refresh listeners when a later registration throws`.
+
 ### Added
 
 - **Deferred live build is now on by default (stage 8 follow-up, not released).**

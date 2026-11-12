@@ -572,3 +572,57 @@ test('exposes a stable refresh version and safe timings', () => {
   assert.ok(REFRESH_DEFAULTS.settleMs >= 200, 'covers the writer batch drain');
   assert.ok(REFRESH_DEFAULTS.idleMs > REFRESH_DEFAULTS.settleMs);
 });
+
+
+test('a timed-out opening releases the in-flight slot when return never settles', async () => {
+  let follows = 0;
+  const t = make({
+    timings: { buildTimeoutMs: 20 },
+    follow: async () => {
+      follows += 1;
+      if (follows === 1) {
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              next: () => new Promise(() => {}),
+              return: () => new Promise(() => {}),
+            };
+          },
+        };
+      }
+      return (async function* () {
+        yield frame();
+      })();
+    },
+  });
+  try {
+    t.refresh.noteActivity('session-a');
+    await t.clock.fireNext(); // idle timer: the first build starts
+    t.refresh.noteActivity('session-b');
+    await t.clock.run();
+
+    assert.equal(t.refresh.report.failed, 1, 'the timeout is still counted as a failure');
+    assert.equal(t.refresh.report.inFlight, null, 'the global build slot was released');
+    assert.equal(follows, 2, 'the queued Session still got its build');
+    assert.equal(t.state.stored.length, 1);
+    assert.equal(t.state.stored[0].sessionId, 'session-b');
+  } finally {
+    t.refresh.dispose();
+  }
+});
+
+test('re-checks Agent status after the settle wait', async () => {
+  const t = make({ timings: { settleMs: 10 } });
+  try {
+    t.refresh.noteActivity('session-a');
+    await t.clock.fireNext(); // idle timer: the build enters the settle wait
+    await waitFor(() => t.refresh.report.inFlight === 'session-a');
+    t.refresh.noteAgentStatus('session-a', 'running');
+    await t.clock.run(6);
+
+    assert.equal(t.follows.length, 0, 'a Session that started running during the wait is not followed');
+    assert.ok(t.refresh.report.skippedRunning >= 1);
+  } finally {
+    t.refresh.dispose();
+  }
+});

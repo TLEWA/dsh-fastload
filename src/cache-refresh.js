@@ -48,6 +48,13 @@ export const REFRESH_VERSION = 1;
 const CACHE_API_VERSION = 1;
 
 /**
+ * Upper bound for closing the opening iterator. An async generator queues
+ * return() behind an outstanding next(), so a read that never settles would
+ * otherwise hold the global build slot after its timeout has already fired.
+ */
+const READ_OPENING_CLEANUP_MS = 250;
+
+/**
  * Timings chosen against the DSH Host, not against a benchmark:
  *
  * - idleMs has to be longer than the gaps inside one turn (tool round-trips are
@@ -426,6 +433,37 @@ export function createCacheRefresh(options = {}) {
     }
   }
 
+  /**
+   * Ask the iterator to close without waiting forever: the abort above has
+   * already given up on the read, so cleanup must be bounded too. A late
+   * rejection is consumed here instead of surfacing as an unhandled one.
+   */
+  function closeIterator(iterator) {
+    return new Promise((resolve) => {
+      let deadline = null;
+      let done = false;
+      const finish = () => {
+        if (done) return;
+        done = true;
+        if (deadline !== null) {
+          try {
+            timers.clearTimeout(deadline);
+          } catch {}
+          deadline = null;
+        }
+        resolve();
+      };
+      deadline = timers.setTimeout(finish, READ_OPENING_CLEANUP_MS);
+      try {
+        const returned = typeof iterator.return === 'function' ? iterator.return() : undefined;
+        if (returned && typeof returned.then === 'function') returned.then(finish, finish);
+        else finish();
+      } catch {
+        finish();
+      }
+    });
+  }
+
   async function readOpening(sessionId, controller) {
     const request = {
       address: { kind: 'session', sessionId },
@@ -470,9 +508,7 @@ export function createCacheRefresh(options = {}) {
         const step = await Promise.race([iterator.next(), timeout]);
         return step && !step.done ? step.value : null;
       } finally {
-        try {
-          await iterator.return?.();
-        } catch {}
+        await closeIterator(iterator);
       }
     } finally {
       if (deadline !== null) timers.clearTimeout(deadline);
@@ -546,6 +582,16 @@ export function createCacheRefresh(options = {}) {
       }
       if (settled !== revision) {
         report.revisionMoved += 1;
+        schedule(sessionId, timings.idleMs);
+        return;
+      }
+
+      // The Agent can start during the settle wait or the stat above; the
+      // earlier check predates both. Re-check before creating a controller or
+      // following, because noteAgentStatus cannot find a controller until it
+      // is registered and would let a running Session be followed.
+      if (agentStatus.get(sessionId) === 'running') {
+        report.skippedRunning += 1;
         schedule(sessionId, timings.idleMs);
         return;
       }

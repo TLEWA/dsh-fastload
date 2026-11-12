@@ -7,6 +7,14 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **页缓存命中后关闭流不再遗留调试探针。** `DSH_FASTLOAD_DEBUG=1` 且客户端只读取缓存首帧就 `return()` 时，整个生成器（含缓存 yield）都由 `finally` 停止探针，避免递归 `setImmediate` 持续占用 Host。回归测试：`closing after the cached frame stops the debug lag probe`。
+- **启动预热先订阅再发起 follow。** `armRestoreSignal` 先建立 selection 订阅，确认状态仍为 `waiting` 后才排队；订阅抛错时预热标记 failed，不会留下已启动的 follow。回归测试：`does not prewarm when the selection subscription throws`。
+- **超时的页缓存读取有界关闭迭代器。** `readOpening` 的 `return()` 最多等待 250 ms 并与超时竞速，随后释放全局 inFlight，超时仍计入失败。回归测试：`a timed-out opening releases the in-flight slot when return never settles`。
+- **构建在 settle/stat 之后重新检查 Agent 状态。** 若期间 Agent 转为 running，则跳过 follow 并重新排期。回归测试：`re-checks Agent status after the settle wait`。
+- **空闲刷新注册失败时释放已安装监听。** `agent/status` 或 `session/disposed` 订阅抛错时立即 `releaseRefresh()`，再发布 disabled 状态。回归测试：`releases idle refresh listeners when a later registration throws`。
+
 ### 新增
 
 - **延后真实 follow 改为默认开启（阶段 8 后续决定，未发布）。**

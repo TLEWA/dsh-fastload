@@ -205,176 +205,193 @@ function wrapPageCache(result, options) {
     // Started before the cache lookup so the probe has ticks to compare by the
     // time the live build runs: a build that blocks the Host loop shows up as
     // one wide gap. Debug-only; stopped in `finally` if the stream ends early.
-    const lag = timings ? createLagProbe() : null;
-    const pullAt = process.hrtime.bigint();
-    let probe = { hit: false };
+    let lag = null;
+    let lagStats = null;
+    // Idempotent: the first live frame reads the probe, and the outer
+    // cleanup may run again; that cleanup also covers the cached yield,
+    // where the consumer can return without ever starting the live loop.
+    const stopLag = () => {
+      if (lag === null || lagStats !== null) return lagStats;
+      lagStats = lag.stop();
+      return lagStats;
+    };
     try {
-      probe = await cache.lookup(sessionId, variant);
-    } catch {}
-    if (timings) timings.lookupMs = performance.now() - timeStart;
-
-    const cached = probe && probe.hit ? probe.opening : null;
-    const cachedCursor = cached && Number.isFinite(cached.cursor) ? cached.cursor : null;
-    const cachedRevision = cached && cached.assistantStream ? cached.assistantStream.revision : undefined;
-    let served = false;
-
-    if (cached) {
-      served = true;
-      state.pageCacheHits += 1;
-      log?.write(
-        'hit sid=' + sessionId + ' cursor=' + cachedCursor + ' records=' +
-          (Array.isArray(cached.records) ? cached.records.length : -1) + ' hasMore=' + cached.hasMore
-      );
-      if (config.debug) {
-        const totalMs = Number(process.hrtime.bigint() - pullAt) / 1e6;
-        process.stderr.write('[fl] page cache ready ' + totalMs.toFixed(1) + 'ms\n');
-      }
-      if (config.debug) {
-        process.stderr.write('[fl] page cache served cursor=' + cachedCursor + ' records=' + (Array.isArray(cached.records) ? cached.records.length : -1) + '\n');
-      }
-      if (timings) timings.sendMs = performance.now() - timeStart;
-      yield cached;
-    }
-    // Consumer came back for the next frame: everything up to here was the
-    // cache read plus handing the bytes to the transport.
-    if (timings) {
-      timings.resumeMs = performance.now() - timeStart;
-      timings.wallSend = epoch + timings.sendMs;
-    }
-
-    // Stage 5 (opt-in): a bounded, cancellable yield between the cached page
-    // and the live build. Off by default; a refused gate or any error leaves
-    // the stage-3 single setImmediate below untouched.
-    let deferral = null;
-    if (served && defer) {
+      // Started before the cache lookup so the probe has ticks to compare
+      // by the time the live build runs: a build that blocks the Host loop
+      // shows up as one wide gap. Debug-only.
+      lag = timings ? createLagProbe() : null;
+      const pullAt = process.hrtime.bigint();
+      let probe = { hit: false };
       try {
-        deferral = await defer.wait({ sessionId, request, cached, signal });
-      } catch {
-        deferral = null;
+        probe = await cache.lookup(sessionId, variant);
+      } catch {}
+      if (timings) timings.lookupMs = performance.now() - timeStart;
+
+      const cached = probe && probe.hit ? probe.opening : null;
+      const cachedCursor = cached && Number.isFinite(cached.cursor) ? cached.cursor : null;
+      const cachedRevision = cached && cached.assistantStream ? cached.assistantStream.revision : undefined;
+      let served = false;
+
+      if (cached) {
+        served = true;
+        state.pageCacheHits += 1;
+        log?.write(
+          'hit sid=' + sessionId + ' cursor=' + cachedCursor + ' records=' +
+            (Array.isArray(cached.records) ? cached.records.length : -1) + ' hasMore=' + cached.hasMore
+        );
+        if (config.debug) {
+          const totalMs = Number(process.hrtime.bigint() - pullAt) / 1e6;
+          process.stderr.write('[fl] page cache ready ' + totalMs.toFixed(1) + 'ms\n');
+        }
+        if (config.debug) {
+          process.stderr.write('[fl] page cache served cursor=' + cachedCursor + ' records=' + (Array.isArray(cached.records) ? cached.records.length : -1) + '\n');
+        }
+        if (timings) timings.sendMs = performance.now() - timeStart;
+        yield cached;
       }
-    }
-    if (timings && deferral) timings.deferMs = Number(deferral.waitedMs) || 0;
+      // Consumer came back for the next frame: everything up to here was the
+      // cache read plus handing the bytes to the transport.
+      if (timings) {
+        timings.resumeMs = performance.now() - timeStart;
+        timings.wallSend = epoch + timings.sendMs;
+      }
 
-    if (served && !(deferral && deferral.deferred)) {
-      // Give the transport a turn to flush the cached page before the live
-      // history build starts competing for the same thread.
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+      // Stage 5 (opt-in): a bounded, cancellable yield between the cached page
+      // and the live build. Off by default; a refused gate or any error leaves
+      // the stage-3 single setImmediate below untouched.
+      let deferral = null;
+      if (served && defer) {
+        try {
+          deferral = await defer.wait({ sessionId, request, cached, signal });
+        } catch {
+          deferral = null;
+        }
+      }
+      if (timings && deferral) timings.deferMs = Number(deferral.waitedMs) || 0;
 
-    if (timings) timings.wallBuild = epoch + (performance.now() - timeStart);
-    let first = true;
-    const iterator = result[Symbol.asyncIterator]();
-    try {
-      for (;;) {
-        const step = await iterator.next();
-        if (step.done) return;
-        const frame = step.value;
+      if (served && !(deferral && deferral.deferred)) {
+        // Give the transport a turn to flush the cached page before the live
+        // history build starts competing for the same thread.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
 
-        if (first) {
-          first = false;
-          if (timings) {
-            const now = performance.now();
-            timings.liveMs = now - timeStart;
-            const stats = lag.stop();
-            timings.stallMs = stats.stallMs;
-            timings.lagSlices = stats.slices;
-            const line =
-              'timing sid=' + sessionId + ' lookup=' + ms(timings.lookupMs) +
-                ' send=' + ms(timings.sendMs) + ' resume=' + ms(timings.resumeMs) +
-                ' defer=' + ms(timings.deferMs) + ' live=' + ms(timings.liveMs) +
-                ' stall=' + ms(timings.stallMs) + ' lagSlices=' + timings.lagSlices +
-                ' total=' + ms(now - timeStart) +
-                ' wallSend=' + Math.round(timings.wallSend) +
-                ' wallBuild=' + Math.round(timings.wallBuild) +
-                ' deferReason=' + (deferral ? deferral.reason : 'off');
-            log?.write(line);
-            if (config.debug) process.stderr.write('[fl] ' + line + '\n');
-            state.pageCacheTiming = {
-              sid: sessionId,
-              lookupMs: timings.lookupMs,
-              sendMs: timings.sendMs,
-              resumeMs: timings.resumeMs,
-              deferMs: timings.deferMs,
-              liveMs: timings.liveMs,
-              stallMs: timings.stallMs,
-              lagSlices: timings.lagSlices,
-              totalMs: now - timeStart,
-              wallSend: Math.round(timings.wallSend),
-              wallBuild: Math.round(timings.wallBuild),
-              deferReason: deferral ? deferral.reason : 'off',
-            };
-          }
-          if (frame && frame.type === 'snapshot') {
-            log?.write(
-              'live sid=' + sessionId + ' records=' +
-                (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor +
-                ' hasMore=' + frame.hasMore + ' rev=' +
-                (frame.assistantStream ? frame.assistantStream.revision : '-')
-            );
-            if (served) {
-              const realCursor = Number.isFinite(frame.cursor) ? frame.cursor : null;
-              const realRevision = frame.assistantStream ? frame.assistantStream.revision : undefined;
-              const sameBaseline = realRevision === cachedRevision;
-              if (sameBaseline && realCursor !== null && cachedCursor !== null && realCursor >= cachedCursor) {
-                // The live page is windowed, so "cursor moved forward" alone does
-                // not prove the delta is complete. Only replay a delta that runs
-                // exactly from cached cursor + 1 through the live cursor.
-                let expected = cachedCursor + 1;
-                const delta = [];
-                for (const record of frame.records || []) {
-                  const event = record && record.event;
-                  const seq = event && event.seq;
-                  if (!Number.isFinite(seq) || seq <= cachedCursor) continue;
-                  if (seq !== expected) { expected = -1; break; }
-                  delta.push(event);
-                  expected += 1;
+      if (timings) timings.wallBuild = epoch + (performance.now() - timeStart);
+      let first = true;
+      const iterator = result[Symbol.asyncIterator]();
+      try {
+        for (;;) {
+          const step = await iterator.next();
+          if (step.done) return;
+          const frame = step.value;
+
+          if (first) {
+            first = false;
+            if (timings) {
+              const now = performance.now();
+              timings.liveMs = now - timeStart;
+              const stats = stopLag();
+              timings.stallMs = stats.stallMs;
+              timings.lagSlices = stats.slices;
+              const line =
+                'timing sid=' + sessionId + ' lookup=' + ms(timings.lookupMs) +
+                  ' send=' + ms(timings.sendMs) + ' resume=' + ms(timings.resumeMs) +
+                  ' defer=' + ms(timings.deferMs) + ' live=' + ms(timings.liveMs) +
+                  ' stall=' + ms(timings.stallMs) + ' lagSlices=' + timings.lagSlices +
+                  ' total=' + ms(now - timeStart) +
+                  ' wallSend=' + Math.round(timings.wallSend) +
+                  ' wallBuild=' + Math.round(timings.wallBuild) +
+                  ' deferReason=' + (deferral ? deferral.reason : 'off');
+              log?.write(line);
+              if (config.debug) process.stderr.write('[fl] ' + line + '\n');
+              state.pageCacheTiming = {
+                sid: sessionId,
+                lookupMs: timings.lookupMs,
+                sendMs: timings.sendMs,
+                resumeMs: timings.resumeMs,
+                deferMs: timings.deferMs,
+                liveMs: timings.liveMs,
+                stallMs: timings.stallMs,
+                lagSlices: timings.lagSlices,
+                totalMs: now - timeStart,
+                wallSend: Math.round(timings.wallSend),
+                wallBuild: Math.round(timings.wallBuild),
+                deferReason: deferral ? deferral.reason : 'off',
+              };
+            }
+            if (frame && frame.type === 'snapshot') {
+              log?.write(
+                'live sid=' + sessionId + ' records=' +
+                  (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor +
+                  ' hasMore=' + frame.hasMore + ' rev=' +
+                  (frame.assistantStream ? frame.assistantStream.revision : '-')
+              );
+              if (served) {
+                const realCursor = Number.isFinite(frame.cursor) ? frame.cursor : null;
+                const realRevision = frame.assistantStream ? frame.assistantStream.revision : undefined;
+                const sameBaseline = realRevision === cachedRevision;
+                if (sameBaseline && realCursor !== null && cachedCursor !== null && realCursor >= cachedCursor) {
+                  // The live page is windowed, so "cursor moved forward" alone does
+                  // not prove the delta is complete. Only replay a delta that runs
+                  // exactly from cached cursor + 1 through the live cursor.
+                  let expected = cachedCursor + 1;
+                  const delta = [];
+                  for (const record of frame.records || []) {
+                    const event = record && record.event;
+                    const seq = event && event.seq;
+                    if (!Number.isFinite(seq) || seq <= cachedCursor) continue;
+                    if (seq !== expected) { expected = -1; break; }
+                    delta.push(event);
+                    expected += 1;
+                  }
+                  if (expected !== -1 && expected - 1 === realCursor) {
+                    for (const event of delta) yield { type: 'event', event };
+                    log?.write('replay sid=' + sessionId + ' events=' + delta.length + ' from=' + cachedCursor);
+                    continue;
+                  }
+                  log?.write(
+                    'drop sid=' + sessionId + ' reason=gap cached=' + cachedCursor +
+                      ' live=' + realCursor + ' expected=' + expected
+                  );
+                  cache.evict(probe.key);
+                  state.pageCacheDropped += 1;
+                  throw new Error('fastload page cache is stale: the delta after cursor ' + cachedCursor + ' is incomplete');
                 }
-                if (expected !== -1 && expected - 1 === realCursor) {
-                  for (const event of delta) yield { type: 'event', event };
-                  log?.write('replay sid=' + sessionId + ' events=' + delta.length + ' from=' + cachedCursor);
-                  continue;
-                }
-                log?.write(
-                  'drop sid=' + sessionId + ' reason=gap cached=' + cachedCursor +
-                    ' live=' + realCursor + ' expected=' + expected
-                );
+                // The live page disagrees with the cached one (or the assistant
+                // stream baseline moved), and a second opening frame is not
+                // allowed. Fail the stream so the client resyncs from scratch;
+                // the stale file is already gone, so the retry takes the plain
+                // path.
                 cache.evict(probe.key);
                 state.pageCacheDropped += 1;
-                throw new Error('fastload page cache is stale: the delta after cursor ' + cachedCursor + ' is incomplete');
+                log?.write(
+                  'drop sid=' + sessionId + ' live=' + realCursor + ' cached=' + cachedCursor +
+                    ' baseline=' + realRevision + '/' + cachedRevision
+                );
+                if (config.debug) {
+                  process.stderr.write('[fl] page cache dropped cursor=' + realCursor + ' cached=' + cachedCursor + ' baseline=' + realRevision + '/' + cachedRevision + '\n');
+                }
+                throw new Error('fastload page cache is stale: baseline moved ' + realRevision + '/' + cachedRevision);
               }
-              // The live page disagrees with the cached one (or the assistant
-              // stream baseline moved), and a second opening frame is not
-              // allowed. Fail the stream so the client resyncs from scratch;
-              // the stale file is already gone, so the retry takes the plain
-              // path.
-              cache.evict(probe.key);
-              state.pageCacheDropped += 1;
-              log?.write(
-                'drop sid=' + sessionId + ' live=' + realCursor + ' cached=' + cachedCursor +
-                  ' baseline=' + realRevision + '/' + cachedRevision
-              );
-              if (config.debug) {
-                process.stderr.write('[fl] page cache dropped cursor=' + realCursor + ' cached=' + cachedCursor + ' baseline=' + realRevision + '/' + cachedRevision + '\n');
+              if (probe && probe.revision) {
+                cache.store(sessionId, probe.revision, probe.key, frame);
+                log?.write(
+                  'store sid=' + sessionId + ' records=' +
+                    (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor
+                );
               }
-              throw new Error('fastload page cache is stale: baseline moved ' + realRevision + '/' + cachedRevision);
-            }
-            if (probe && probe.revision) {
-              cache.store(sessionId, probe.revision, probe.key, frame);
-              log?.write(
-                'store sid=' + sessionId + ' records=' +
-                  (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor
-              );
             }
           }
-        }
 
-        yield frame;
+          yield frame;
+        }
+      } finally {
+        stopLag();
+        try {
+          await iterator.return?.();
+        } catch {}
       }
     } finally {
-      if (lag) lag.stop();
-      try {
-        await iterator.return?.();
-      } catch {}
+      stopLag();
     }
   })();
 }
@@ -870,6 +887,12 @@ export function apply(ctx, options) {
             }, { global: true }));
           }
         } catch (error) {
+          // A partly installed subscription must not survive the failure: an
+          // orphaned listener would keep starting idle refreshes behind a
+          // report that already says disabled. Release before publishing.
+          try {
+            releaseRefresh();
+          } catch {}
           state.idleRefresh = {
             active: false,
             disabledReason: String((error && error.message) || error),

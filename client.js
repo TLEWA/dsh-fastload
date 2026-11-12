@@ -1348,11 +1348,17 @@ const INSTRUMENT = DIAG && DEBUG;
                   finishRestorePrewarm('skipped', problem);
                   return;
                 }
-                queuePrewarm(restorePrewarm.sid, 'restore');
-                const stage = restorePrewarm.stage;
-                if (stage === 'queued' || stage === 'running') {
-                  armRestoreWatch(service, restorePrewarm.sid);
+                // Subscribe before starting any network work: a rejected
+                // subscribe throws out of here and the caller marks the
+                // prewarm failed without a follow in flight. The callback may
+                // also run synchronously (already-open / selection-changed),
+                // so the stage is checked again afterwards.
+                armRestoreWatch(service, restorePrewarm.sid);
+                if (disposed || restorePrewarm.stage !== 'waiting') {
+                  stopRestoreWatch();
+                  return;
                 }
+                queuePrewarm(restorePrewarm.sid, 'restore');
                 return;
               }
               restoreSignalAttempts += 1;

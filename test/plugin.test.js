@@ -32,6 +32,7 @@ const CANONICAL_VARIANT = JSON.stringify([100, 40, 2, true, 0, 8 * 1024 * 1024, 
 function makeContext(options = {}) {
   const calls = [];
   const disposers = [];
+  let offCalls = 0;
   const listeners = new Map();
   const registrations = [];
   const follow = async function* (request) {
@@ -52,11 +53,15 @@ function makeContext(options = {}) {
     },
     on(name, listener, listenOptions) {
       if (options.onThrows) throw new Error(options.onThrows);
+      if (options.onThrowsAt === name) {
+        throw new Error(options.onThrowsAtMessage || options.onThrowsAt + ' registration failed');
+      }
       const entry = { name, listener, options: listenOptions };
       registrations.push(entry);
       if (!listeners.has(name)) listeners.set(name, new Set());
       listeners.get(name).add(entry);
       return () => {
+        offCalls += 1;
         listeners.get(name)?.delete(entry);
         const index = registrations.indexOf(entry);
         if (index >= 0) registrations.splice(index, 1);
@@ -69,6 +74,9 @@ function makeContext(options = {}) {
     sc,
     calls,
     registrations,
+    offCalls() {
+      return offCalls;
+    },
     emit(name, ...args) {
       for (const entry of [...(listeners.get(name) || [])]) entry.listener(...args);
     },
@@ -887,6 +895,54 @@ test('disposing the plugin clears a pending deferral', async () => {
       ]);
       assert.notEqual(settled, 'timeout');
     });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+
+test('releases idle refresh listeners when a later registration throws', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({
+          services: { sessionPersistence: persistence },
+          onThrowsAt: 'agent/status',
+          onThrowsAtMessage: 'agent/status registration failed',
+        });
+        apply(t.ctx, {
+          refresh: {
+            timings: { idleMs: 5, settleMs: 0, minGapMs: 0, busyRetryMs: 5, buildTimeoutMs: 5000 },
+            probeLoad: async () => 0,
+          },
+        });
+
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.equal(state.idleRefresh.active, false);
+        assert.match(state.idleRefresh.disabledReason, /agent\/status registration failed/);
+        assert.equal(t.offCalls(), 1, 'the already-registered session/event listener was released');
+        assert.equal(t.registrations.length, 0);
+        assert.equal(t.listenerCount('session/event'), 0);
+        assert.equal(t.listenerCount('agent/status'), 0);
+        assert.equal(t.listenerCount('session/disposed'), 0);
+
+        // A residual listener would schedule a refresh here; the released
+        // subscription must not start a follow.
+        t.emit('session/event', { id: 'session-idle' });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        assert.equal(t.calls.length, 0);
+        t.dispose();
+      }
+    );
   } finally {
     await cleanupDir(dir);
   }
