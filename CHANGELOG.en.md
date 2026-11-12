@@ -5,6 +5,21 @@ All notable changes are documented here. Versions follow
 
 [简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md)
 
+## [Unreleased]
+
+### Added
+
+- **Predictive prewarm (P6, web client).** Hovering or focusing a sidebar session
+  row for 150 ms issues `session/follow({ activate: false })` to build the opening
+  page into the page cache; a real click then hits the cache. The passive read
+  never activates the Agent and never writes to the session. At most 4 serialized
+  jobs, one prewarm per session per 10 minutes, cancelled when the pointer leaves.
+  Bench on one cold session: click-to-first-row 337 ms → 110 ms; the host log
+  shows the prewarm follow with `activate=false` and the click with
+  `activate=true` served from cache. Disable with
+  `localStorage['dsh-fastload.prewarm']='0'` or
+  `window.__DSH_FASTLOAD_PREWARM__=false`.
+
 ## [0.3.1] - 2026-11-12
 
 ### Added

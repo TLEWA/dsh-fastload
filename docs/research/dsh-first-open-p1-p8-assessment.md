@@ -96,15 +96,21 @@ Chromium 网络帧时间（相对导航开始）：
 - 边界：只服务初始页（`beforeSeq/throughSeq` 不参与），不影响 Agent 恢复（`activate` 语义原样透传）
   与写入（日志不动）。
 
-### P6 预测性预加载 —— 未实施，设计已定
+### P6 预测性预加载 —— 已实施（客户端，复用上游已有的 `activate:false`）
 
-- 现状：冷启动首开已由 P5 页缓存覆盖（17 ms 读盘），同进程重复打开由 `coldLogMemo` 覆盖
-  （0.8–1.3 ms）；hover 预热的边际收益主要在“缓存 miss（会话刚更新）且下一次点击很可能是它”。
-- 设计：客户端监听侧栏行的 `pointerover`/`focusin`，延迟 120 ms 后请求一次
-  `activate:false` 的临时 follow，只取首帧即取消；LRU 去重、并发 1、`AbortSignal` 取消、
-  不触碰 store。阻塞点：客户端 `sessions.retain` 固定 `activate:true`，需要新增不激活的预热
-  RPC 或让宿主接受 `activate:false` 的只读预热（属上游小改）。
-- 风险：预加载与真实打开共用日志解析锁，需要优先级与取消；留待下一阶段。
+- 上游不需要改：`session/follow` 的参数本来就带 `activate`。宿主只在
+  `request.activate === true` 时 `retain`+`promote`（`dsh-api-session-controller/lib/index.js:2523`），
+  省略或 `false` 走 `observation[Symbol.dispose]()`，只读不激活。之前的审计误判为“必须新增 RPC”。
+- 实现：客户端监听侧栏会话行（`[data-row-key^="session:"]`）的 `pointerover`/`focusin`，
+  150 ms 后发起 `session.follow({ address, assistantStream: true, activate: false })`，
+  取首帧后立即 `iterator.return()`。队列上限 4、串行执行、同一会话 10 分钟 TTL 去重、
+  指针移开取消、卸载时 abort；`localStorage['dsh-fastload.prewarm']='0'` 可关闭。
+- 数据（bench，冷进程、清空页缓存、同一会话）：
+  - 262d33b1（6.0 MB 日志）：点击→首行 **337 ms → 110 ms**（预热 follow 233 ms 在 hover 等待内完成）。
+  - 6e1e17af（rewind 会话，扩展页 736 条）：**253 ms → 174 ms**（预热 175 ms，命中页缓存 18 ms）。
+  - 宿主日志：预热请求 `activate=false`，点击请求 `activate=true` 且 `page cache hit`。
+- 边界：预热只写页缓存，不激活 Agent、不写会话；真实打开仍走原来的 `activate:true` 并带
+  页缓存校验；缓存失配时按既有逻辑丢弃。
 
 ### P7 图片与附件延迟加载 —— 本样本无收益，未实施
 
@@ -136,7 +142,7 @@ Chromium 网络帧时间（相对导航开始）：
 ## 4. 剩余问题与下一阶段
 
 1. P1 乐观打开（上游客户端）——预计再省 150–200 ms，是当前最大的单点。
-2. P6 预热：先补一个 `activate:false` 的只读预热 RPC，再在客户端接 hover/focus。
-3. P8 完整方案：摘要 + 按需取全文，需要协议版本号与客户端展开钩子。
-4. P3 lazy projection domain：收益在 Host 冷启动 CPU/内存，需 benchmark 启动阶段。
-5. 页缓存的失效压力测试：连续写入、并发打开、revision 变化、缓存损坏（已有单测，仍需真机长跑）。
+2. P8 完整方案：摘要 + 按需取全文，需要协议版本号与客户端展开钩子。
+3. P3 lazy projection domain：收益在 Host 冷启动 CPU/内存，需 benchmark 启动阶段。
+4. 页缓存的失效压力测试：连续写入、并发打开、revision 变化、缓存损坏（已有单测，仍需真机长跑）。
+5. P6 的长时间可用性：预热与真实打开共享日志解析，仍需在真实 DSH 里观察 CPU 峰值与取消路径。
