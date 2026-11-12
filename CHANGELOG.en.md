@@ -14,6 +14,7 @@ All notable changes are documented here. Versions follow
 - **A timed-out page-cache read closes its iterator with a bound.** `readOpening` now races `return()` against a 250 ms cleanup timer, releases the global inFlight slot afterwards, and still records the timeout as a failure. Regression test: `a timed-out opening releases the in-flight slot when return never settles`.
 - **The build re-checks Agent status after the settle and stat waits.** If the Agent started running meanwhile, the build skips the follow and reschedules. Regression test: `re-checks Agent status after the settle wait`.
 - **A failed idle-refresh registration releases installed listeners.** When `agent/status` or `session/disposed` registration throws, `releaseRefresh()` now runs immediately before the disabled state is published. Regression test: `releases idle refresh listeners when a later registration throws`.
+- **The queue head is re-checked after the async load probe.** If the head Session is removed while the probe is pending (disposed, or the Agent started running), the pump no longer shifts the next entry and builds the stale head; it loops again with the current head. Regression test: `does not build a cancelled queue head after the load probe`.
 
 ### Added
 

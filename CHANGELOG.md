@@ -14,6 +14,7 @@
 - **超时的页缓存读取有界关闭迭代器。** `readOpening` 的 `return()` 最多等待 250 ms 并与超时竞速，随后释放全局 inFlight，超时仍计入失败。回归测试：`a timed-out opening releases the in-flight slot when return never settles`。
 - **构建在 settle/stat 之后重新检查 Agent 状态。** 若期间 Agent 转为 running，则跳过 follow 并重新排期。回归测试：`re-checks Agent status after the settle wait`。
 - **空闲刷新注册失败时释放已安装监听。** `agent/status` 或 `session/disposed` 订阅抛错时立即 `releaseRefresh()`，再发布 disabled 状态。回归测试：`releases idle refresh listeners when a later registration throws`。
+- **异步探测后重新确认队首。** 探测期间队首 Session 被 dispose 或 Agent 转忙而移出队列时，pump 不再误删下一项并构建过期队首，而是重新循环处理当前队首。回归测试：`does not build a cancelled queue head after the load probe`。
 
 ### 新增
 

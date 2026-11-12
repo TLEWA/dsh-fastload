@@ -248,6 +248,50 @@ test('tracks sessions independently but builds them one at a time', async () => 
   }
 });
 
+test('does not build a cancelled queue head after the load probe', async () => {
+  let releaseProbe;
+  let probeCalls = 0;
+  const t = make({
+    probeLoad: () => {
+      probeCalls += 1;
+      if (probeCalls === 1) {
+        return new Promise((resolve) => {
+          releaseProbe = resolve;
+        });
+      }
+      return Promise.resolve(0);
+    },
+  });
+  try {
+    t.refresh.noteActivity('session-a');
+    t.refresh.noteActivity('session-b');
+    await t.clock.fireNext(); // idle timer for A; pump blocks in the probe
+    await waitFor(() => probeCalls === 1);
+    await t.clock.fireNext(); // idle timer for B while the probe is pending
+    assert.equal(t.refresh.report.queued, 2);
+
+    t.refresh.noteDisposed('session-a');
+    assert.equal(t.refresh.report.queued, 1, 'the disposed head is dropped from the queue');
+
+    releaseProbe(0);
+    await waitFor(
+      () => t.follows.length === 1 && t.refresh.report.inFlight === null && t.refresh.report.queued === 0
+    );
+
+    assert.deepEqual(
+      t.follows.map((entry) => entry.request.address.sessionId),
+      ['session-b'],
+      'the stale head is not followed'
+    );
+    assert.equal(t.state.stored.length, 1);
+    assert.equal(t.state.stored[0].sessionId, 'session-b');
+    assert.equal(t.refresh.report.built, 1);
+  } finally {
+    if (releaseProbe) releaseProbe(0);
+    t.refresh.dispose();
+  }
+});
+
 test('skips a session whose page is already cached', async () => {
   const t = make({ cache: { hit: frame() } });
   try {

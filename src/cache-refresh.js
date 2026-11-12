@@ -413,6 +413,10 @@ export function createCacheRefresh(options = {}) {
         }
         const lag = await safeProbe();
         if (!active) break;
+        // The head may be cancelled while the probe is awaited (Session
+        // disposed, Agent started). Never shift a different Session and then
+        // build the stale head; loop again with the current head.
+        if (queue[0] !== head) continue;
         if (lag > timings.lagBudgetMs) {
           deferrals.set(head, deferredCount + 1);
           report.deferred += 1;
