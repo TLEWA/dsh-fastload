@@ -1,6 +1,6 @@
 {
   "name": "dsh-fastload",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "Reduce the first history page of long DSH sessions to two visible turns.",
   "license": "MIT",

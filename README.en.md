@@ -162,6 +162,22 @@ handling" path instead:
 | `session/list` build | 238.7 ms | 82.0 ms (first, indexed), 1.1–1.8 ms (TTL hit) |
 | cached page read | — | 16.9–17.7 ms (cold build 583.5 ms) |
 
+A rewind-session A/B on 2026-11-12 used `session-6e1e17af…` (9 turns, 532 events
+in the initial page, the whole page inside two `/rewind` cut ranges; DSH
+0.2.2-rc.1 + dsh-rewind-plugin 0.21.2, headless Chrome, a fresh page per run,
+page cache cleared so the first run of each label is cold):
+
+| Metric | rewind-aware off | default (rewind-aware) |
+|---|---:|---:|
+| first row | 902 / 956 / 1,237 ms | 820 / 835 / 839 / 878 ms |
+| "Load earlier" clicks | 1 per run in 3/3 runs (681–1,237 ms) | none |
+| content before the click | blank (pill only) | 76 visible rows |
+| page-cache replay | 18.0 ms, cold first frame 144.0 ms | 19.8–28.2 ms, cold first frame 181.7 ms |
+
+The extension merges only when the previous page ends exactly at the current
+page's first `seq`, and only one page is pulled in; cache hits still verify
+cursor / revision and replay the delta.
+
 Per-item assessment, reasons for the items not implemented and the upstream
 proposals are in `docs/research/dsh-first-open-p1-p8-assessment.md`.
 
