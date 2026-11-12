@@ -1075,6 +1075,34 @@ const DEBUG = (() => {
               }
               return rebuilt;
             };
+            // A stale page cache cannot be repaired inside the stream (a
+            // second opening frame is a protocol violation), so the host fails
+            // the stream and the client rebuilds the source from scratch. The
+            // stale file is evicted host-side, so the retry is a plain load.
+            const STALE_PATTERN = /page cache is stale/i;
+            const staleWatch = new Map();
+            const staleResync = (sessionId) => {
+              try {
+                if (!sessionId) return false;
+                const sessions = ctx && typeof ctx.get === 'function' ? ctx.get('sessions') : undefined;
+                const owner = sessions && typeof sessions.binding === 'function' ? sessions.binding(sessionId) : undefined;
+                const session = owner && owner.session;
+                if (!session || session.openState !== 'error') return false;
+                const message = session.openError ? String(session.openError.message || '') : '';
+                if (!STALE_PATTERN.test(message)) return false;
+                const now = performance.now();
+                const rec = staleWatch.get(sessionId) || { at: 0, tries: 0 };
+                if (rec.tries >= 3 || now - rec.at < 1200) return false;
+                rec.at = now;
+                rec.tries += 1;
+                staleWatch.set(sessionId, rec);
+                state.heal = { action: 'cache-resync', at: Math.round(now), tries: rec.tries, message: message.slice(0, 120) };
+                Promise.resolve(session.resync()).catch((error) => { state.error = String(error); });
+                return true;
+              } catch {
+                return false;
+              }
+            };
             const guardAttach = (rec) => {
               if (rec.unsub) return true;
               try {
@@ -1085,6 +1113,12 @@ const DEBUG = (() => {
                 rec.unsub = source.subscribe(() => {
                   guardCheck('event');
                 });
+                const session = owner && owner.session;
+                if (!rec.sessionUnsub && session && typeof session.subscribe === 'function') {
+                  rec.sessionUnsub = session.subscribe(() => {
+                    staleResync(rec.sessionId);
+                  });
+                }
                 return true;
               } catch {
                 return false;
@@ -1097,6 +1131,7 @@ const DEBUG = (() => {
                 if (id === sessionId) continue;
                 try {
                   if (old.unsub) old.unsub();
+                  if (old.sessionUnsub) old.sessionUnsub();
                 } catch {}
                 guards.delete(id);
               }
@@ -1291,6 +1326,7 @@ const DEBUG = (() => {
               } catch {}
               try {
                 ensureGuard();
+                staleResync(currentSessionId());
                 if (DEBUG) {
                   instrumentFlush();
                   instrumentBuilder();

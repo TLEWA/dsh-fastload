@@ -24,6 +24,11 @@ import { createServeLog } from './src/serve-log.js';
 import { findRewindCuts, earliestCut, firstSeqOf, hiddenByCuts } from './src/rewind.js';
 
 export const name = 'dsh-fastload';
+
+// Exported for the page-cache replay tests: the wrapper is a pure function of
+// (live result, cache, variant) and is easier to exercise directly than
+// through a stubbed session controller.
+export { wrapPageCache };
 export const inject = ['sessionController'];
 
 /** Cache directory shared by the session-header index and the page cache. */
@@ -147,20 +152,37 @@ function wrapPageCache(result, options) {
               const realRevision = frame.assistantStream ? frame.assistantStream.revision : undefined;
               const sameBaseline = realRevision === cachedRevision;
               if (sameBaseline && realCursor !== null && cachedCursor !== null && realCursor >= cachedCursor) {
-                let replayed = 0;
+                // The live page is windowed, so "cursor moved forward" alone does
+                // not prove the delta is complete. Only replay a delta that runs
+                // exactly from cached cursor + 1 through the live cursor.
+                let expected = cachedCursor + 1;
+                const delta = [];
                 for (const record of frame.records || []) {
                   const event = record && record.event;
-                  if (event && Number.isFinite(event.seq) && event.seq > cachedCursor) {
-                    replayed += 1;
-                    yield { type: 'event', event };
-                  }
+                  const seq = event && event.seq;
+                  if (!Number.isFinite(seq) || seq <= cachedCursor) continue;
+                  if (seq !== expected) { expected = -1; break; }
+                  delta.push(event);
+                  expected += 1;
                 }
-                log?.write('replay sid=' + sessionId + ' events=' + replayed + ' from=' + cachedCursor);
-                continue;
+                if (expected !== -1 && expected - 1 === realCursor) {
+                  for (const event of delta) yield { type: 'event', event };
+                  log?.write('replay sid=' + sessionId + ' events=' + delta.length + ' from=' + cachedCursor);
+                  continue;
+                }
+                log?.write(
+                  'drop sid=' + sessionId + ' reason=gap cached=' + cachedCursor +
+                    ' live=' + realCursor + ' expected=' + expected
+                );
+                cache.evict(probe.key);
+                state.pageCacheDropped += 1;
+                throw new Error('fastload page cache is stale: the delta after cursor ' + cachedCursor + ' is incomplete');
               }
               // The live page disagrees with the cached one (or the assistant
-              // stream baseline moved). Keep the cached page and stop instead
-              // of emitting a second opening frame.
+              // stream baseline moved), and a second opening frame is not
+              // allowed. Fail the stream so the client resyncs from scratch;
+              // the stale file is already gone, so the retry takes the plain
+              // path.
               cache.evict(probe.key);
               state.pageCacheDropped += 1;
               log?.write(
@@ -170,7 +192,7 @@ function wrapPageCache(result, options) {
               if (config.debug) {
                 process.stderr.write('[fl] page cache dropped cursor=' + realCursor + ' cached=' + cachedCursor + ' baseline=' + realRevision + '/' + cachedRevision + '\n');
               }
-              return;
+              throw new Error('fastload page cache is stale: baseline moved ' + realRevision + '/' + cachedRevision);
             }
             if (probe && probe.revision) {
               cache.store(sessionId, probe.revision, probe.key, frame);

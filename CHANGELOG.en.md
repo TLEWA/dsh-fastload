@@ -42,6 +42,12 @@ All notable changes are documented here. Versions follow
 - The opening-page cache now validates every entry (non-empty `snapshot`,
   last `seq` equal to the cursor) and drops the file otherwise, so a bad page
   can never be served.
+- When a cache hit turns out to have a moved assistant baseline or a
+  non-contiguous delta, the host no longer ends the stream silently (which left
+  the client on a stale page with no further updates): it evicts the entry and
+  fails the stream once, and the client rebuilds through `session.resync()` on
+  the original path. Three regression cases cover the replay, the gap and the
+  baseline mismatch.
 - The web client adds blank diagnostics and self-heal: it records the installed
   window, errors and a sample timeline, and on "page + button + zero rows" it
   tries one more page before falling back to a rebuild. Automatic
