@@ -1103,6 +1103,16 @@ const DEBUG = (() => {
                 return false;
               }
             };
+            const releaseGuard = (rec) => {
+              try {
+                if (rec.unsub) rec.unsub();
+              } catch {}
+              try {
+                if (rec.sessionUnsub) rec.sessionUnsub();
+              } catch {}
+              rec.unsub = null;
+              rec.sessionUnsub = null;
+            };
             const guardAttach = (rec) => {
               if (rec.unsub) return true;
               try {
@@ -1129,15 +1139,12 @@ const DEBUG = (() => {
               if (!sessionId) return;
               for (const [id, old] of guards) {
                 if (id === sessionId) continue;
-                try {
-                  if (old.unsub) old.unsub();
-                  if (old.sessionUnsub) old.sessionUnsub();
-                } catch {}
+                releaseGuard(old);
                 guards.delete(id);
               }
               let rec = guards.get(sessionId);
               if (!rec) {
-                rec = { sessionId, unsub: null, checks: 0, rebuilds: 0, at: 0, checked: false, reloaded: false };
+                rec = { sessionId, unsub: null, sessionUnsub: null, checks: 0, rebuilds: 0, at: 0, checked: false, reloaded: false };
                 guards.set(sessionId, rec);
               }
               const attached = guardAttach(rec);
@@ -1360,11 +1367,7 @@ const DEBUG = (() => {
               clearInterval(interval);
               for (const timer of timers) clearTimeout(timer);
               timers.clear();
-              for (const rec of guards.values()) {
-                try {
-                  if (rec.unsub) rec.unsub();
-                } catch {}
-              }
+              for (const rec of guards.values()) releaseGuard(rec);
               guards.clear();
               for (const type of inputEvents) {
                 document.removeEventListener(type, noteInput, { capture: true });
