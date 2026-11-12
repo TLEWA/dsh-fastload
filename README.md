@@ -121,6 +121,18 @@ Web 端还有三个不进环境变量的开关；前两个极性相反，别写�
   预热的行为和节奏常量都不变。原型 `instrument` 探针需要诊断与 `dsh-fastload.debug`
   同时开启。
 
+### 卸载、禁用与回退
+
+- 在 profile 中禁用或移除 `dsh-fastload` 后，插件的 disposer 会还原被包装的
+  `sessionController.follow`、删除 `__dshFastload` 标记、停止空闲刷新计时器/监听/在飞构建、
+  取消尚未执行的延后构建，并 flush 页缓存；DSH 回到 stock 行为。
+- 页缓存与 `serve.log` 留在 `$DSH_HOME/cache/dsh-fastload`（或 `DSH_FASTLOAD_CACHE_DIR`）；
+  它们不会被 stock 读取，可随时手动删除。插件从不修改会话日志、会话选择或正式 Session Store。
+- 所有实验开关（空闲刷新、延后构建、启动预热、诊断）默认关闭；环境变量非法时回退默认值。
+  卸载或关闭开关不需要迁移数据。
+- 私有接口与未知 DSH 版本的降级路径见 `AGENTS.md`「私有接口与能力检测」；完整集成/回归
+  证据见 `docs/research/plugin-optimization-final-report.md`。
+
 ### 安装
 
 - **DSH 桌面版：** 打开 **插件 → 添加插件**，输入 `dsh-fastload` 并确认。

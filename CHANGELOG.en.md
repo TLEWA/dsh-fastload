@@ -9,6 +9,19 @@ All notable changes are documented here. Versions follow
 
 ### Added
 
+- **Stage 8 final integration, regression and release preparation (local branch, not
+  released).** Merged the stage 2+3+6 integration head with the stage 5 deferred live build,
+  the stage 0 baseline and the stage 4 CSS NO-GO report as `feat/optimization-final`. Of the
+  13 executable regression scenarios, 12 passed, 0 failed and 1 was not executed (a
+  subagent-origin session has no workspace row, so the sidebar cannot reach it). The
+  cache-hit path ran 10 opens per sample on the same isolated fixture with DSH 0.2.2-rc.1,
+  comparing "all switches off" and "all switches on" against the stage 0 stock numbers.
+  Stage 7's 7A client-validation work and 7B private tail reader are **not implemented**
+  because no hard data supports them. Every experimental switch still defaults to off;
+  disabling or uninstalling restores `follow` through the disposer, while hot reload depends
+  on the host calling the disposer and was not verified on a real host in this stage. Full
+  tables, limits and
+  unexecuted tests are in `docs/research/plugin-optimization-final-report.md`.
 - **Core/diagnostics split in the web client (stage 6).** The default path no longer
   walks React fibers for sampling, keeps no error/rejection/flush/build log arrays,
   does not wrap `console.error`, does not mount `window.__DSH_FASTLOAD__`, and

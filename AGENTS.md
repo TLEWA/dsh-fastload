@@ -69,6 +69,41 @@
   取消时只 abort 本插件 restore 来源的 `AbortController`，不得触碰原生 follow 流；
   不写 `dsh.sessions.current`，也不向正式 Session Store 写预热快照。
 
+### 私有接口与能力检测（阶段 8）
+
+- 本插件只使用 DSH 的插件面（`ctx.inject` / `ctx.get` / `ctx.on` / `ctx.effect` /
+  `ctx.remote`）和实测存在的服务形状。所有私有访问必须在调用点做 `typeof` 能力检测；
+  缺失、抛错或未知枚举值一律走保守分支，不得把异常抛给宿主，也不得因为“看起来像”就
+  启用侵入优化。当前实测基线是 DSH 0.2.2-rc.1（`bench/.tools/dsh022`）。
+- `sessionController.follow`：注入后检查 `sc && typeof sc.follow === 'function'`；
+  缺失时只写 `state.error`，不安装包装。安装前用 `target.__dshFastload` 防重复；
+  dispose 只在 `target.follow === wrapped` 时还原自己的描述符，否则说明已被别的插件
+  再包装，停用并原样透传。
+- `sessionPersistence.stat`：页缓存、空闲刷新和延后构建共同依赖它的 revision。
+  只有 `c.get('sessionPersistence')` 且 `typeof stat === 'function'` 时才创建页缓存；
+  缺失或抛错就跳过缓存并继续 live，不影响 follow 原路径。
+- `agents` 服务：`c.get('agents')`（或 `ctx.agents`）是可选的；`get(sessionId)`
+  返回 `undefined`/`null` 表示没有 Agent（idle）；服务缺失、`get` 抛错、`agent.status`
+  不是 `running`/`idle` 一律记为 `unknown`。只有确证 `idle` 才允许延后真实构建。
+- `session/event`、`agent/status`、`session/disposed`：优先 `ctx.on`，其次 `c.on`；
+  拿不到事件 API 就关闭空闲预热并写入 `state.idleRefresh.disabledReason`。每个监听器的
+  off 函数必须保存，并在 dispose 时调用。
+- follow 请求形状（`activate`、`assistantStream`、`beforeSeq`/`throughSeq`、`signal`）：
+  只依据已观测字段判断，缺字段按“不满足优化前提”处理；不得假设未观测字段存在。
+- Web 端 `ctx.get('uiWorkspace')`：`mainReference.sessionId` 与
+  `selection.subscribe` / `selection.getSnapshot` 都是可选的。启动预热在任一缺失、
+  订阅失败或等不到选择信号时跳过，不得裸跑。
+- Web 端 `ctx.remote.session.follow`：悬停与启动预热都先经 `remoteSession()` 检测；
+  缺失时记 `prewarm.error='remote.session.follow is unavailable'`，不发起请求。
+- `localStorage` 读取统一包 try/catch（隐私模式或禁用存储），失败按默认值；只写诊断/
+  调试偏好，不写 `dsh.sessions.current`。
+- 页缓存 `lookup` / `store` / `flush`：`lookup` 为 null、revision 不匹配、zstd 解码失败、
+  `store` 抛错都按 miss 处理并继续 live；`flush` 注册在 `c.effect`/`ctx.effect` 的
+  disposer 中，异常吞掉但可在 debug 下记录。key 必须包含 revision、页窗口和裁剪配置，
+  未知 key 版本直接 miss。
+- 未知 DSH 版本不猜测私有结构，一律退化为 stock 行为；新增私有依赖前先补
+  `test/plugin.test.js` 的能力缺失用例。
+
 ### 测试与文档
 
 - `npm test` 使用 `node --test`；行为改动必须同时补 `test/plugin.test.js`、`test/trim.test.js`

@@ -16,6 +16,9 @@ the exploratory workspace on 2026-11-09.
 - `css-content-visibility-experiment.md` — stage-4 candidate E: pure-CSS
   `content-visibility` lazy rendering; NO-GO (redundant with `hidden="until-found"`,
   no measurable steady-state gain, stale-size risk on resize/zoom).
+- `plugin-optimization-final-report.md` — stage 8 final integration, 16-item
+  regression matrix, all-off/all-on performance comparison, stage 7 decision,
+  private-API risks and the unexecuted-test list.
 
 The documents contain machine-specific absolute paths from the test machine;
 they are retained for reproducibility, not as install instructions.

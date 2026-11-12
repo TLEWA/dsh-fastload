@@ -152,6 +152,22 @@ two have opposite polarities:
   The prototype `instrument` probe needs both diagnostics and
   `dsh-fastload.debug`.
 
+### Uninstall, disable and rollback
+
+- Disabling or removing `dsh-fastload` from the profile runs the plugin disposer: it restores
+  the wrapped `sessionController.follow`, removes the `__dshFastload` mark, stops idle-refresh
+  timers/listeners/in-flight builds, cancels a pending deferred build and flushes the page
+  cache. DSH then behaves exactly like stock.
+- Page-cache files and `serve.log` stay under `$DSH_HOME/cache/dsh-fastload` (or
+  `DSH_FASTLOAD_CACHE_DIR`). Stock never reads them and they can be deleted at any time. The
+  plugin never modifies session logs, the session selection or the real Session Store.
+- Every experimental switch (idle refresh, deferred live build, startup prewarm, diagnostics)
+  is off by default; invalid environment values fall back to defaults. Disabling the plugin
+  needs no data migration.
+- Private-API and unknown-version fallbacks are listed in `AGENTS.md` ("Private APIs and
+  capability detection"); the full integration evidence is in
+  `docs/research/plugin-optimization-final-report.md`.
+
 ### Install
 
 - **DSH Desktop:** open **Plugins → Add plugin**, enter `dsh-fastload`, and

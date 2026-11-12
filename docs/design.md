@@ -286,6 +286,58 @@ restore hardcodes `activate: true`; the measured 0.2.1-rc.5 host sent
 are available to repeat the measurement; otherwise this is a candidate for removal
 in a later cleanup.
 
+## CSS content-visibility (stage 4, NO-GO)
+
+Candidate E applied `content-visibility: auto` plus measured `contain-intrinsic-size` to
+top-level transcript rows. On the long fixture (2,150 anchor rows, 917 chat-node seats,
+39,186 DOM nodes) 2,084 anchor rows already sat inside `hidden="until-found"` process groups
+and were not rendered at all; only 66 top-level rows rendered, 64 of them offscreen.
+Applying CV to those 64 kept `scrollHeight` and `scrollTop` exactly stable (0 px drift) and
+produced 0 long tasks with the same frame distribution as the control. A forced-layout probe
+moved 6.9 ms to 5.3 ms median, but the ranges overlap, the difference is ~1.6 ms, and it does
+not map to first open or "load older": both happen before real heights are known, while
+`contain-intrinsic-size` can only be written after measurement. Cached heights also go stale
+on resize/zoom and would cause thumb jumps, and a correct invalidation path would re-measure
+everything. The decision is **NO-GO**; no runtime switch or client module was added. Report:
+`docs/research/css-content-visibility-experiment.md`. The full 5× A/B, CPU-throttled and
+resize tests were not executed.
+
+## Stage 7 decision: not implemented
+
+The plan allows 7A (client event-validation pipeline) and 7B (private read-only tail reader)
+only when hard data supports them. Stage 8 found no such data.
+
+- **7A:** no profile attributes click-window long tasks to event validation. Stage 5 measured
+  the cached frame, then the live frame 11–20 ms later, then the first row about 155 ms after
+  the live frame (about 170 ms after the cached frame). The single >50 ms task in the click
+  window (stage 0 medians: 281 ms normal, 147.5 ms long) matches React mounting/rendering
+  the snapshot, not per-event validation. There is no queueing metric in the opening path that validation
+  would improve.
+- **7B:** a tail reader only helps a cold or cache-miss build. The warm cache-hit live build is
+  4–5 ms (stage 5), the warm live open is ~24 ms and a cold Host open is 112–239 ms; the
+  renderer's snapshot→first row (136–348 ms in the stage 8 A/B) dominates. 7B would also read
+  private log bytes and layout, so its expected gain is below noise while its compatibility
+  risk is high.
+
+Both candidates are therefore **not implemented**. Revisit only if a real profile attributes
+`>50 ms` tasks to validation or tail reading, or if first-row-after-live-frame drops below
+~30 ms while the Host build still exceeds ~100 ms.
+
+## Stage 8 final integration
+
+The release candidate is the local branch `feat/optimization-final`, created from the stage
+2+3+6 integration head `b4a9966` and merged with stage 5 (`2de7618`), stage 0 (`1a0349f`) and
+stage 4 (`bcc73f9`) using `--no-ff`. All experimental switches stay off by default; the plugin
+version is unchanged. The regression matrix executed 13 scenarios (12 pass, 0 fail, 1 not
+executed because a subagent-origin session has no workspace row), and the performance A/B ran
+10 cache-hit opens per sample for "all switches off" and "all switches on" on the same
+fixture with DSH 0.2.2-rc.1. Every user-initiated open on that host sends `activate: true`,
+so the stage 5 deferral reports `deferReason=activate` and is a no-op; the "all on" arm
+measures idle cache refresh plus prewarm/restore, not deferred live builds. Capability
+detection and version fallbacks are listed in
+`AGENTS.md`; the full results, risks and unexecuted tests are in
+`docs/research/plugin-optimization-final-report.md`.
+
 ## What is intentionally absent
 
 - No DOM virtualization: that is a separate, larger change; this plugin only
