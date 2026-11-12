@@ -107,7 +107,7 @@ DSH_FASTLOAD_DEFER_LIVE_BUILD=1 只在缓存确实命中、请求为初始页（
 真实 follow 与首帧绘制之间的可测竞争，因此不建议开启，保留开关只为将来客户端时序变化时
 可复验。
 
-Web 端还有三个不进环境变量的开关；前两个极性相反，别写反：
+Web 端还有五个不进环境变量的开关；前两个极性相反，别写反：
 
 - `localStorage['dsh-fastload.prewarm'] = '0'`（或
   `window.__DSH_FASTLOAD_PREWARM__ = false`）关闭会话悬停预测性预加载，**默认开启**。
@@ -120,6 +120,61 @@ Web 端还有三个不进环境变量的开关；前两个极性相反，别写�
   `console.error`、不注册仅诊断用的轮询和延时器；补页、自愈、错误恢复与 P6/启动
   预热的行为和节奏常量都不变。原型 `instrument` 探针需要诊断与 `dsh-fastload.debug`
   同时开启。
+- `localStorage['dsh-fastload.lazy-groups'] = '1'`（或
+  `window.__DSH_FASTLOAD_LAZY_GROUPS__ = true`）开启“永久占位”折叠组懒挂载实验，
+  **默认关闭**；只替换已完成折叠组里的 tool-call 占位。
+- `localStorage['dsh-fastload.lazy-progressive'] = '1'`（或
+  `window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__ = true`）开启“渐进补挂”对照实验，
+  **默认关闭**；两者同时开启时渐进模式优先。渐进模式在首帧后分片补回原生节点，
+  本轮在 turn rail / 未加载历史场景实测出严重后台长任务，判定 **NO-GO**，仅保留作对照。
+
+### 阶段 4 实验：折叠组懒挂载（默认关闭）
+
+本分支带两个默认关闭的 Web 端实验，均只改 `conversation.chat.flow` entry 的
+`component`，不新增槽位声明，也不改动会话日志、Host 协议或上游源码。
+
+#### 永久占位（permanent，可作条件 GO 的实验）
+
+把**已完成且折叠**的 process group 里的 `tool-call` 节点替换成纯文本占位，避免在
+首屏为隐藏内容挂载完整工具视图；group 外层（标题、统计、展开按钮、滚动锚点）仍由
+原生 `ChatGroupSeat` 渲染。
+
+- 开关：`localStorage['dsh-fastload.lazy-groups'] = '1'`（或
+  `window.__DSH_FASTLOAD_LAZY_GROUPS__ = true`），**默认关闭**。
+- 只处理 `node.kind === 'tool-call'`、所属 process 已 foldable 且当前 `open=false`、
+  `anchorSeq` 落在 `processStartSeq` 与 `answerAnchorSeq` 之间的节点；assistant-step、
+  turn-process、运行中、交错输入、待审批、异常和被强制展开的组一律委托原生
+  `renderSlot`。
+- 占位文本来自 `node.data` 的有界递归提取（最多 4000 字符），目的是让折叠组内的
+  文本仍留在 DOM 中；它不是原生折叠摘要的精确副本，可能包含折叠态不显示的原始
+  参数，也可能漏掉摘要里的措辞。真实 Ctrl+F / `beforematch` 行为本轮未在可见
+  浏览器中验证。
+- 展开时占位立即换回完整原生节点，再折叠时重新变占位。该路径会卸载节点视图，
+  节点内部的局部状态（如工具输出内的滚动位置、展开状态）不保证保留。
+- 实测（DSH 0.2.2-rc.1、headless Chrome 157、warm host、standard/compact/detailed，
+  normal/long 各 6 次交替 A/B）：normal 点击→首行 481.6 → 428.6 ms（−11.0%），
+  DOM 8598 → 4888；long 265.9 → 237.0 ms（−10.9%），DOM 4114 → 2869。long 首行后
+  会多出约 39 ms 的第二个 Long Task（settled 142.5 → 181.5 ms），总 Long Task 时间
+  可能反而增加；详见 `docs/research/stage4-revisit.md`。
+
+#### 渐进补挂（progressive，本轮 NO-GO）
+
+首帧只给隐藏 tool-call 放占位，双 `requestAnimationFrame` 确认绘制后，用
+`requestIdleCallback`（无则 `setTimeout 0`）按每片最多 4 个节点 / 约 5 ms 补回原生
+`renderSlot`；Ctrl+F 捕获阶段先用 `flushSync` 全量补回，`beforematch` 兜底。
+
+- 开关：`localStorage['dsh-fastload.lazy-progressive'] = '1'`（或
+  `window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__ = true`），**默认关闭**；同时开启永久
+  模式时渐进模式优先。
+- 首开收益与永久模式同量级，最终 DOM/文本/滚动与原生一致；normal 补挂约 0.8–0.9 s、
+  long 约 0.13–0.19 s，首开补挂分片未见 >50 ms 长任务。
+- 但 turn rail 跳转到未加载历史时，渐进模式总补挂 12.9 s、产生 93 个 69–110 ms
+  Long Task；同一场景 stock 只有 1 个 781 ms 任务。按“后台长任务明显变差”判
+  **NO-GO**，不作为可发布方案，仅保留代码与数据供复现。
+- 实现依赖私有接口：读取 `ctx.slots.entries('conversation.chat.flow')` 的 entry 并
+  临时替换 `entry.component`。安装前做能力检测，任何未知形状都不安装；卸载时
+  仅当 `entry.component` 仍是本插件的 wrapper 才还原。该接口不在 DSH 公共 API
+  承诺内，升级后可能失效，因此两个实验都默认关闭，也不建议作为默认行为发布。
 
 ### 卸载、禁用与回退
 
@@ -128,7 +183,7 @@ Web 端还有三个不进环境变量的开关；前两个极性相反，别写�
   取消尚未执行的延后构建，并 flush 页缓存；DSH 回到 stock 行为。
 - 页缓存与 `serve.log` 留在 `$DSH_HOME/cache/dsh-fastload`（或 `DSH_FASTLOAD_CACHE_DIR`）；
   它们不会被 stock 读取，可随时手动删除。插件从不修改会话日志、会话选择或正式 Session Store。
-- 所有实验开关（空闲刷新、延后构建、启动预热、诊断）默认关闭；环境变量非法时回退默认值。
+- 所有实验开关（空闲刷新、延后构建、启动预热、诊断、折叠组懒挂载、渐进补挂）默认关闭；环境变量非法时回退默认值。
   卸载或关闭开关不需要迁移数据。
 - 私有接口与未知 DSH 版本的降级路径见 `AGENTS.md`「私有接口与能力检测」；完整集成/回归
   证据见 `docs/research/plugin-optimization-final-report.md`。

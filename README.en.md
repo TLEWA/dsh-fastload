@@ -133,7 +133,7 @@ it. The stage 5 A/B measurement found no measurable contention between the real 
 first-frame paint, so enabling it is not recommended; it stays available to re-check if client
 timing changes.
 
-The web half has three switches that are not environment variables; the first
+The web half has five switches that are not environment variables; the first
 two have opposite polarities:
 
 - `localStorage['dsh-fastload.prewarm'] = '0'` (or
@@ -151,7 +151,76 @@ two have opposite polarities:
   error recovery, both prewarm paths and their rhythm constants are unchanged.
   The prototype `instrument` probe needs both diagnostics and
   `dsh-fastload.debug`.
+- `localStorage['dsh-fastload.lazy-groups'] = '1'` (or
+  `window.__DSH_FASTLOAD_LAZY_GROUPS__ = true`) enables the permanent-placeholder
+  lazy folded-group experiment; **off by default**.
+- `localStorage['dsh-fastload.lazy-progressive'] = '1'` (or
+  `window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__ = true`) enables the progressive-hydration
+  control experiment; **off by default**. Progressive wins when both are on. It is a
+  **NO-GO** this round because rail/unloaded-history jumps produced severe background
+  long tasks; it is kept only for comparison.
 
+### Stage 4 experiment: lazy folded groups (off by default)
+
+Both web experiments are off by default. They only replace the `component` of the
+`conversation.chat.flow` entry; they do not add a slot declaration, change session logs,
+the host protocol or upstream source.
+
+#### Permanent placeholder (conditional GO as an experiment)
+
+Inside a **finished and collapsed** process group, `tool-call` nodes are replaced with a
+plain-text placeholder so the first screen does not mount the full tool view for hidden
+content. The group shell (title, stats, disclosure button, scroll anchors) is still
+rendered by the native `ChatGroupSeat`.
+
+- Switch: `localStorage['dsh-fastload.lazy-groups'] = '1'` (or
+  `window.__DSH_FASTLOAD_LAZY_GROUPS__ = true`); **off by default**.
+- Only nodes with `node.kind === 'tool-call'`, a foldable process whose
+  `open=false`, and an `anchorSeq` between `processStartSeq` and
+  `answerAnchorSeq` are replaced. Assistant steps, turn-process nodes, running
+  groups, interleaved input, approvals, errors and force-opened groups always
+  delegate to the native `renderSlot`.
+- The placeholder text is a bounded recursive extraction from `node.data` (at
+  most 4000 characters), intended to keep the folded text in the DOM. It is not
+  an exact copy of the native collapsed summary: it may include raw arguments
+  that the collapsed view hides and may miss wording from the summary. Real
+  Ctrl+F / `beforematch` behavior was not verified in a visible browser in this
+  round.
+- Expanding swaps the placeholder back to the full native node; collapsing
+  restores the placeholder. This unmounts the node view, so node-local state
+  (scroll position inside a tool result, local expansion) is not guaranteed to
+  survive.
+- Measured with DSH 0.2.2-rc.1, headless Chrome 157, warm host, standard/compact/detailed,
+  6 alternating A/B reps per normal/long fixture: normal click-to-first-row 481.6 to
+  428.6 ms (-11.0%), DOM 8598 to 4888; long 265.9 to 237.0 ms (-10.9%), DOM 4114 to 2869.
+  The long session gains a second ~39 ms Long Task after the first row (settled 142.5
+  to 181.5 ms), so total Long Task time may increase. See
+  `docs/research/stage4-revisit.md`.
+
+#### Progressive hydration (NO-GO this round)
+
+The first frame uses placeholders only for hidden tool calls. After two
+`requestAnimationFrame` callbacks confirm paint, it hydrates native `renderSlot` in
+`requestIdleCallback` slices (fallback `setTimeout 0`), at most 4 nodes / about 5 ms per
+slice. A capture-phase Ctrl/Cmd+F handler calls `flushSync` to hydrate everything before
+the browser find bar runs; `beforematch` is a fallback.
+
+- Switch: `localStorage['dsh-fastload.lazy-progressive'] = '1'` (or
+  `window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__ = true`); **off by default**. Progressive
+  wins when both switches are on.
+- First-open gain is in the same range as permanent, and final DOM/text/scroll match
+  stock. Normal drains in about 0.8-0.9 s, long in about 0.13-0.19 s; no >50 ms slice was
+  observed during first-open draining.
+- On a turn-rail jump into unloaded history, though, progressive took 12.9 s to drain and
+  produced 93 long tasks of 69-110 ms; stock produced one 781 ms task in the same scenario.
+  Under the "background long tasks clearly worse" rule this is **NO-GO**; the code and data
+  are kept only for reproduction.
+- The implementation depends on a private shape: it reads the
+  `ctx.slots.entries('conversation.chat.flow')` entry and temporarily replaces
+  `entry.component`. Installation is capability-checked and does nothing on an
+  unknown shape; disposal restores the original only while `entry.component` is
+  still this plugin's wrapper. That entry is not a public DSH API promise, so both
+  experiments stay off by default and are not recommended as default behavior.
 ### Uninstall, disable and rollback
 
 - Disabling or removing `dsh-fastload` from the profile runs the plugin disposer: it restores
@@ -161,7 +230,7 @@ two have opposite polarities:
 - Page-cache files and `serve.log` stay under `$DSH_HOME/cache/dsh-fastload` (or
   `DSH_FASTLOAD_CACHE_DIR`). Stock never reads them and they can be deleted at any time. The
   plugin never modifies session logs, the session selection or the real Session Store.
-- Every experimental switch (idle refresh, deferred live build, startup prewarm, diagnostics)
+- Every experimental switch (idle refresh, deferred live build, startup prewarm, diagnostics, lazy folded groups, progressive hydration)
   is off by default; invalid environment values fall back to defaults. Disabling the plugin
   needs no data migration.
 - Private-API and unknown-version fallbacks are listed in `AGENTS.md` ("Private APIs and

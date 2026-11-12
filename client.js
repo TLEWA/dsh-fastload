@@ -120,11 +120,461 @@ const INSTRUMENT = DIAG && DEBUG;
   const RESTORE_SIGNAL_RETRIES = 10;
   const RESTORE_START_DELAY_MS = 0;
 
+  // === stage 4 experimental lazy groups (default off) ===
+  //
+  // Long sessions spend most of their first React commit on folded process
+  // groups. The native flow renders every ChatNodeSeat even when the group is
+  // inside hidden="until-found"; only the paint is skipped. This experiment
+  // swaps the flow entry's component for a wrapper that replaces the node
+  // view of folded tool calls with a plain-text placeholder, while leaving the
+  // group shell (header, disclosure, stats, anchors) untouched.
+  //
+  // It is deliberately conservative: only tool-call nodes that the native
+  // presentation already marks as folded members are replaced. Everything
+  // else delegates to the original renderSlot, so ownership checks, context
+  // and slot assembly stay on the native path. If any private shape is
+  // missing, the installer does nothing and the stock component renders.
+  const LAZY_GROUPS_KEY = 'dsh-fastload.lazy-groups';
+  const LAZY_PROGRESSIVE_KEY = 'dsh-fastload.lazy-progressive';
+  const LAZY_GROUPS_SLOT = 'conversation.chat.flow';
+  const LAZY_GROUP_TEXT_MAX = 4000;
+  const LAZY_PROGRESSIVE_CHUNK_NODES = 4;
+  const LAZY_PROGRESSIVE_CHUNK_MS = 5;
+  function lazyGroupsEnabled() {
+    try {
+      if (localStorage.getItem(LAZY_GROUPS_KEY) === '1') return true;
+    } catch {}
+    return window.__DSH_FASTLOAD_LAZY_GROUPS__ === true;
+  }
+  function lazyProgressiveEnabled() {
+    try {
+      if (localStorage.getItem(LAZY_PROGRESSIVE_KEY) === '1') return true;
+    } catch {}
+    return window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__ === true;
+  }
+  function lazyAnyEnabled() { return lazyProgressiveEnabled() || lazyGroupsEnabled(); }
+  function lazyGroupText(value) {
+    const out = [];
+    let budget = LAZY_GROUP_TEXT_MAX;
+    const walk = (item, depth) => {
+      if (budget <= 0 || depth > 6 || item == null) return;
+      if (typeof item === 'string') {
+        const text = item.length > budget ? item.slice(0, budget) : item;
+        out.push(text);
+        budget -= text.length;
+        return;
+      }
+      if (typeof item === 'number' || typeof item === 'boolean') {
+        const text = String(item);
+        out.push(text);
+        budget -= text.length;
+        return;
+      }
+      if (Array.isArray(item)) {
+        for (const child of item) {
+          walk(child, depth + 1);
+          if (budget <= 0) break;
+        }
+        return;
+      }
+      if (typeof item === 'object') {
+        for (const key of Object.keys(item)) {
+          if (key === 'raw' || key === 'json') continue;
+          walk(item[key], depth + 1);
+          if (budget <= 0) break;
+        }
+      }
+    };
+    try { walk(value, 0); } catch {}
+    return out.join(' ');
+  }
+  function lazyGroupEligible(owner) {
+    const process = owner && owner.turnProcess;
+    const node = owner && owner.node;
+    if (!process || process.foldable !== true || process.open === true) return false;
+    if (!node || node.kind !== 'tool-call') return false;
+    const spec = process.spec;
+    if (!spec) return false;
+    if (typeof node.anchorSeq !== 'number' || node.anchorSeq < spec.processStartSeq) return false;
+    if (spec.answerAnchorSeq !== null && spec.answerAnchorSeq !== undefined && node.anchorSeq >= spec.answerAnchorSeq) return false;
+    return true;
+  }
+  function installLazyGroups(ctx, requireFn, state) {
+    const report = {
+      enabled: false, wrapped: false, wrapperCalls: 0, slotCalls: 0,
+      lazyNodes: 0, nativeNodes: 0, errors: [], reason: null, settings: null,
+      mode: null, progressive: null,
+    };
+    const readChatSettings = () => {
+      try {
+        const forms = ctx && (ctx.configForms || (typeof ctx.get === 'function' ? ctx.get('configForms') : null));
+        const form = forms && typeof forms.get === 'function' ? forms.get('ui-chat') : null;
+        const snapshot = form && typeof form.getSnapshot === 'function' ? form.getSnapshot() : null;
+        const value = snapshot && snapshot.value;
+        if (!value) return null;
+        return {
+          transcriptView: value.transcriptView === undefined ? null : value.transcriptView,
+          collapseTiming: value.collapseTiming === undefined ? null : value.collapseTiming,
+          foldedReplies: value.foldedReplies === undefined ? null : value.foldedReplies,
+        };
+      } catch { return null; }
+    };
+    report.settings = readChatSettings();
+    try { state.lazyGroups = report; } catch {}
+    if (!lazyAnyEnabled()) {
+      report.reason = 'switch-off';
+      return () => {};
+    }
+    report.enabled = true;
+    report.mode = lazyProgressiveEnabled() ? 'progressive' : 'permanent';
+    let React = null;
+    try { React = requireFn('react'); } catch (error) { report.errors.push('react: ' + String(error && error.message || error)); }
+    if (!React || typeof React.createElement !== 'function') {
+      report.reason = 'react-unavailable';
+      return () => {};
+    }
+    let ReactDom = null;
+    try { ReactDom = requireFn('react-dom'); } catch (error) { report.errors.push('react-dom: ' + String(error && error.message || error)); }
+    const flushSync = ReactDom && typeof ReactDom.flushSync === 'function' ? ReactDom.flushSync : null;
+    if (report.mode === 'progressive' && flushSync === null) {
+      // Without a synchronous render, Ctrl+F could run before retired nodes hit
+      // the DOM. Fail closed to stock rendering instead of risking a stale find.
+      report.reason = 'flush-sync-unavailable';
+      report.enabled = false;
+      return () => {};
+    }
+    let slots = null;
+    try { slots = ctx.get && ctx.get('slots'); } catch {}
+    if (!slots) { try { slots = ctx.slots; } catch {} }
+    if (!slots || typeof slots.entries !== 'function') {
+      report.reason = 'slots-unavailable';
+      return () => {};
+    }
+    let entry = null;
+    let original = null;
+    let Wrapper = null;
+    let offSlots = null;
+    let retryTimer = null;
+    const find = () => {
+      try {
+        const list = slots.entries(LAZY_GROUPS_SLOT);
+        return list && list.length > 0 ? list[0] : null;
+      } catch (error) {
+        report.errors.push('entries: ' + String(error && error.message || error));
+        return null;
+      }
+    };
+    const wrap = () => {
+      if (Wrapper !== null) return;
+      const found = find();
+      if (!found || found.__dshFastloadLazyGroups === true) return;
+      report.settings = readChatSettings();
+      const component = found.component;
+      if (component === null || (typeof component !== 'function' && typeof component !== 'object')) return;
+      original = component;
+      Wrapper = function FastloadLazyFlow(props) {
+        report.wrapperCalls += 1;
+        if (report.settings === null) report.settings = readChatSettings();
+        const progressive = report.mode === 'progressive';
+        const latest = React.useRef(props);
+        latest.current = props;
+        const pendingRef = React.useRef(null);
+        if (pendingRef.current === null) pendingRef.current = new Map();
+        const retiredRef = React.useRef(null);
+        if (retiredRef.current === null) retiredRef.current = new Set();
+        const [epoch, setEpoch] = React.useState(0);
+        const drainRef = React.useRef(null);
+        if (drainRef.current === null) {
+          drainRef.current = {
+            started: false, done: false, idle: null, idleKind: null,
+            raf1: 0, raf2: 0, chunks: 0, nodes: 0, maxChunkMs: 0,
+            startedAt: null, doneAt: null, cancelled: false,
+          };
+        }
+        // Keep drain state per mounted flow. Session switches can mount a new
+        // flow before the old cleanup runs; a shared report object would let
+        // the old cleanup mark the new mount cancelled.
+        const mountRef = React.useRef(null);
+        if (mountRef.current === null) {
+          mountRef.current = {
+            mountId: (report.mountSeq || 0) + 1,
+            firstFrameAt: null, firstFramePending: 0, startedAt: null, doneAt: null,
+            chunks: 0, nodes: 0, maxChunkMs: 0, flushSync: flushSync !== null,
+            cancelled: false, revealReason: null, pending: 0, done: false,
+          };
+          report.mountSeq = mountRef.current.mountId;
+          if (progressive) report.progressive = mountRef.current;
+        }
+        const prog = mountRef.current;
+        const cancelIdle = () => {
+          const d = drainRef.current;
+          if (d.idle === null) return;
+          try {
+            if (d.idleKind === 'idle' && typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(d.idle);
+            else clearTimeout(d.idle);
+          } catch {}
+          d.idle = null; d.idleKind = null;
+        };
+        const scheduleIdle = (fn) => {
+          const d = drainRef.current;
+          if (!progressive || d.done || d.cancelled) return;
+          cancelIdle();
+          try {
+            if (typeof window.requestIdleCallback === 'function') {
+              d.idleKind = 'idle';
+              d.idle = window.requestIdleCallback(() => { d.idle = null; d.idleKind = null; fn(); }, { timeout: 300 });
+            } else {
+              d.idleKind = 'timeout';
+              d.idle = setTimeout(() => { d.idle = null; d.idleKind = null; fn(); }, 0);
+            }
+          } catch { d.idle = null; d.idleKind = null; }
+        };
+        const drainChunk = () => {
+          const d = drainRef.current;
+          if (!progressive || d.done || d.cancelled) return;
+          if (d.startedAt === null) d.startedAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+          if (prog && prog.startedAt === null) prog.startedAt = d.startedAt;
+          const pending = pendingRef.current;
+          const keys = [];
+          const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
+          const iterator = pending.keys();
+          while (keys.length < LAZY_PROGRESSIVE_CHUNK_NODES && pending.size > 0) {
+            const next = iterator.next();
+            if (next.done) break;
+            keys.push(next.value);
+            if ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - start >= LAZY_PROGRESSIVE_CHUNK_MS) break;
+          }
+          if (prog) prog.pending = pending.size;
+          if (keys.length === 0) {
+            d.done = true; d.doneAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            if (prog) { prog.done = true; prog.doneAt = d.doneAt; prog.pending = 0; }
+            return;
+          }
+          const apply = () => {
+            for (const key of keys) { pending.delete(key); retiredRef.current.add(key); }
+            setEpoch((value) => value + 1);
+          };
+          const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+          if (flushSync !== null) {
+            try { flushSync(apply); } catch { apply(); }
+          } else {
+            apply();
+          }
+          const dt = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
+          d.chunks += 1; d.nodes += keys.length;
+          if (dt > d.maxChunkMs) d.maxChunkMs = dt;
+          if (prog) {
+            prog.chunks = d.chunks; prog.nodes = d.nodes; prog.maxChunkMs = d.maxChunkMs;
+            prog.pending = pending.size;
+          }
+          if (pending.size > 0 && !d.done && !d.cancelled) scheduleIdle(drainChunk);
+          else {
+            d.done = true; d.doneAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            if (prog) { prog.done = true; prog.doneAt = d.doneAt; prog.pending = 0; }
+          }
+        };
+        const fillAllSync = (reason) => {
+          if (!progressive) return false;
+          const pending = pendingRef.current;
+          if (pending.size === 0) return false;
+          const d = drainRef.current;
+          // Cancel the background drain but leave the wrapper mounted: a later
+          // snapshot may add new placeholders, which must still hydrate.
+          cancelIdle();
+          if (d.raf1) { try { cancelAnimationFrame(d.raf1); } catch {} d.raf1 = 0; }
+          if (d.raf2) { try { cancelAnimationFrame(d.raf2); } catch {} d.raf2 = 0; }
+          const keys = [];
+          for (const key of pending.keys()) keys.push(key);
+          if (keys.length === 0) { pending.clear(); return false; }
+          const apply = () => {
+            for (const key of keys) { pending.delete(key); retiredRef.current.add(key); }
+            setEpoch((value) => value + 1);
+          };
+          if (flushSync !== null) {
+            try { flushSync(apply); } catch { apply(); }
+          } else {
+            apply();
+          }
+          d.done = true; d.started = false;
+          d.doneAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+          if (prog) {
+            prog.done = true; prog.doneAt = d.doneAt; prog.revealReason = reason;
+            prog.pending = pending.size;
+          }
+          return true;
+        };
+        const dropPending = (key) => {
+          const pending = pendingRef.current;
+          if (!pending.has(key)) return;
+          pending.delete(key);
+          retiredRef.current.add(key);
+          if (prog) prog.pending = pending.size;
+          if (pending.size === 0 && prog && !prog.done) {
+            const d = drainRef.current;
+            cancelIdle();
+            d.done = true; d.started = false;
+            d.doneAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            prog.done = true; prog.doneAt = d.doneAt;
+            prog.revealReason = prog.revealReason || 'expanded';
+          }
+        };
+        const custom = React.useMemo(() => function fastloadRenderSlot(key, owner, opts) {
+          report.slotCalls += 1;
+          if (key !== 'conversation.chat.node') {
+            return latest.current.renderSlot(key, owner, opts);
+          }
+          const node = owner && owner.node;
+          try {
+            const eligible = lazyGroupEligible(owner);
+            if (progressive && node && node.kind === 'tool-call') {
+              if (retiredRef.current.has(node.key)) {
+                pendingRef.current.delete(node.key);
+                report.nativeNodes += 1;
+                return latest.current.renderSlot(key, owner, opts);
+              }
+              if (eligible) {
+                pendingRef.current.set(node.key, { owner, opts });
+                if (prog) prog.pending = pendingRef.current.size;
+                report.lazyNodes += 1;
+                return React.createElement('div', {
+                  'data-fastload-lazy-group': '',
+                  'data-fastload-lazy-key': node.key,
+                  style: { minHeight: '18px' },
+                });
+              }
+              if (pendingRef.current.has(node.key)) {
+                dropPending(node.key);
+              }
+            } else if (!progressive && eligible) {
+              report.lazyNodes += 1;
+              return React.createElement('div', {
+                'data-fastload-lazy-group': '',
+                'data-fastload-lazy-key': node.key,
+                style: { minHeight: '18px', whiteSpace: 'pre-wrap' },
+              }, lazyGroupText(node && node.data));
+            }
+          } catch (error) {
+            report.errors.push('lazy: ' + String(error && error.message || error));
+            while (report.errors.length > 8) report.errors.shift();
+          }
+          report.nativeNodes += 1;
+          return latest.current.renderSlot(key, owner, opts);
+        }, [progressive, epoch]);
+        React.useEffect(() => {
+          if (!progressive) return;
+          const d = drainRef.current;
+          if (d.cancelled) return;
+          // A late snapshot can add placeholders after the first wrapper render.
+          // Restart the drain once it has finished so those nodes still hydrate.
+          if (d.done && pendingRef.current.size > 0) {
+            d.done = false; d.started = false; d.chunks = 0; d.nodes = 0; d.maxChunkMs = 0;
+            if (prog) { prog.done = false; prog.doneAt = null; prog.chunks = 0; prog.nodes = 0; }
+          }
+          if (d.started || d.done || pendingRef.current.size === 0) return;
+          d.started = true;
+          if (prog) {
+            prog.firstFrameAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            prog.firstFramePending = pendingRef.current.size;
+          }
+          d.raf1 = requestAnimationFrame(() => {
+            d.raf2 = requestAnimationFrame(() => { d.raf2 = 0; scheduleIdle(drainChunk); });
+          });
+        });
+        React.useEffect(() => {
+          if (!progressive) return undefined;
+          const d = drainRef.current;
+          return () => {
+            d.cancelled = true;
+            cancelIdle();
+            if (d.raf1) { try { cancelAnimationFrame(d.raf1); } catch {} d.raf1 = 0; }
+            if (d.raf2) { try { cancelAnimationFrame(d.raf2); } catch {} d.raf2 = 0; }
+            if (prog) prog.cancelled = true;
+          };
+        }, []);
+        React.useEffect(() => {
+          if (!progressive) return undefined;
+          const onKeyDown = (event) => {
+            if ((event.ctrlKey || event.metaKey) && (event.key === 'f' || event.key === 'F')) fillAllSync('keydown');
+          };
+          const onBeforeMatch = () => { fillAllSync('beforematch'); };
+          document.addEventListener('keydown', onKeyDown, true);
+          document.addEventListener('beforematch', onBeforeMatch, true);
+          return () => {
+            document.removeEventListener('keydown', onKeyDown, true);
+            document.removeEventListener('beforematch', onBeforeMatch, true);
+          };
+        }, []);
+        return React.createElement(original, Object.assign({}, props, { renderSlot: custom }));
+      };
+      try {
+        found.component = Wrapper;
+        found.__dshFastloadLazyGroups = true;
+        entry = found;
+        report.wrapped = true;
+        report.reason = null;
+      } catch (error) {
+        report.errors.push('assign: ' + String(error && error.message || error));
+        Wrapper = null;
+        original = null;
+        return;
+      }
+      if (retryTimer !== null) {
+        clearInterval(retryTimer);
+        retryTimer = null;
+      }
+    };
+    try {
+      if (typeof ctx.on === 'function') {
+        offSlots = ctx.on('slots/changed', (key) => { if (key === LAZY_GROUPS_SLOT) wrap(); });
+      } else if (typeof slots.subscribe === 'function') {
+        offSlots = slots.subscribe(LAZY_GROUPS_SLOT, () => wrap());
+      }
+    } catch (error) {
+      report.errors.push('listen: ' + String(error && error.message || error));
+    }
+    wrap();
+    if (Wrapper === null) {
+      // The chat plugin may register after this module. Keep retrying briefly;
+      // an entry registered later still gets the wrapper before its first open
+      // in the common case. If it is already open, only the next mount helps.
+      let attempts = 0;
+      retryTimer = setInterval(() => {
+        attempts += 1;
+        wrap();
+        if (Wrapper !== null || attempts >= 40) {
+          clearInterval(retryTimer);
+          retryTimer = null;
+        }
+      }, 250);
+    }
+    return () => {
+      if (retryTimer !== null) {
+        clearInterval(retryTimer);
+        retryTimer = null;
+      }
+      if (typeof offSlots === 'function') {
+        try { offSlots(); } catch {}
+        offSlots = null;
+      }
+      if (entry !== null && Wrapper !== null) {
+        try {
+          if (entry.component === Wrapper) entry.component = original;
+          delete entry.__dshFastloadLazyGroups;
+        } catch (error) {
+          report.errors.push('restore: ' + String(error && error.message || error));
+        }
+      }
+      entry = null;
+    };
+  }
+  // === end stage 4 lazy groups ===
+
+
   if (typeof window === 'undefined' || !window.__ModuleLoader__) return;
 
   window.__ModuleLoader__.load({
     id: MODULE_ID,
-    factory() {
+    factory(require) {
       return {
         inject: ['remote', 'remote.session'],
         apply(ctx) {
@@ -165,6 +615,7 @@ const INSTRUMENT = DIAG && DEBUG;
           window.__DSH_FASTLOAD_CLIENT__ = state;
 
           ctx.effect(() => {
+            const disposeLazyGroups = installLazyGroups(ctx, require, state);
             const seen = new WeakSet();
             const blankHandled = new WeakSet();
             const blankFirstSeen = new WeakMap();
@@ -1729,7 +2180,7 @@ const INSTRUMENT = DIAG && DEBUG;
                 flows,
                 slotErrors: [...document.querySelectorAll('[data-slot-error]')].map((node) => node.getAttribute('data-slot-error')),
                 factoryErrors: [...document.querySelectorAll('[data-factory-error]')].map((node) => node.getAttribute('data-factory-error')),
-                client: { build: BUILD, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, healed: state.healed, repairs: state.repairs, advance: state.advance, prewarm: state.prewarm, restorePrewarm: state.restorePrewarm, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error },
+                client: { build: BUILD, lazyGroups: state.lazyGroups, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, healed: state.healed, repairs: state.repairs, advance: state.advance, prewarm: state.prewarm, restorePrewarm: state.restorePrewarm, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error },
                 fibers: fiberProbe(),
                 feed: sessionFeed(true),
                 conversation: conversationProbe(true),
@@ -1815,6 +2266,7 @@ const INSTRUMENT = DIAG && DEBUG;
               },
               guard: () => guardCheck('manual'),
               deep: () => conversationProbe(true),
+              lazy: () => (state.lazyGroups ? JSON.parse(JSON.stringify(state.lazyGroups)) : null),
               last: null,
             };
             if (DIAG) window.__DSH_FASTLOAD__ = diagnosticsApi;
@@ -1922,6 +2374,7 @@ const INSTRUMENT = DIAG && DEBUG;
 
             return () => {
               disposed = true;
+              try { disposeLazyGroups(); } catch {}
               stopRestoreWatch();
               if (restorePrewarm.stage === 'waiting'
                 || restorePrewarm.stage === 'queued'
