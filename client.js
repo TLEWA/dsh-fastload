@@ -712,6 +712,22 @@ const DEBUG = (() => {
             // records the inputs of a publish that produced no chat rows.
             const flushLog = [];
             const buildLog = [];
+            // These patches are DEBUG-only and sit on host-owned prototypes;
+            // disposal has to put the originals back, or a disabled plugin
+            // keeps changing behaviour until the page reloads.
+            const patchTrackers = [];
+            const trackPatch = (owner, key, original, flag) => {
+              patchTrackers.push({ owner, key, original, flag });
+            };
+            const restorePatches = () => {
+              while (patchTrackers.length) {
+                const patch = patchTrackers.pop();
+                try {
+                  if (patch.owner[patch.key] !== patch.original) patch.owner[patch.key] = patch.original;
+                  delete patch.owner[patch.flag];
+                } catch {}
+              }
+            };
             const instrumentFlush = () => {
               try {
                 const conversation = ctx && typeof ctx.get === 'function' ? ctx.get('uiConversation') : undefined;
@@ -764,6 +780,7 @@ const DEBUG = (() => {
                     } catch {}
                     return nodes;
                   };
+                  trackPatch(buildOwner, 'buildTargetNodes', originalBuild, '__dshFastloadBuildPatched');
                 }
                 state.patched = {
                   build: buildOwner === proto ? 'prototype' : 'instance',
@@ -816,6 +833,7 @@ const DEBUG = (() => {
                   } catch {}
                   return result;
                 };
+                trackPatch(proto, 'flush', original, '__dshFastloadPatched');
                 return true;
               } catch {
                 return false;
@@ -883,6 +901,7 @@ const DEBUG = (() => {
                       while (builderLog.length > 6) builderLog.shift();
                     }
                   };
+                  trackPatch(proto, name, original, '__dshFastloadBuilderPatched');
                 };
                 wrap('replace');
                 wrap('apply');
@@ -1369,6 +1388,7 @@ const DEBUG = (() => {
               timers.clear();
               for (const rec of guards.values()) releaseGuard(rec);
               guards.clear();
+              restorePatches();
               for (const type of inputEvents) {
                 document.removeEventListener(type, noteInput, { capture: true });
               }

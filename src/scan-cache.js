@@ -191,6 +191,32 @@ export function installScanCache(options) {
   const originalList = target.list;
   let listMemo = null;
   let inflight = null;
+  // One shared list read serves every caller, so it cannot borrow the first
+  // caller's abort signal: cancelling that caller would abort the read for
+  // everyone else. Each caller keeps its own signal and stops waiting on it.
+  const waitForCaller = (promise, signal) => {
+    if (!signal || typeof signal.addEventListener !== 'function') return promise;
+    return new Promise((resolve, reject) => {
+      const onAbort = () => {
+        reject(signal.reason instanceof Error ? signal.reason : new Error('This operation was aborted'));
+      };
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        (value) => {
+          signal.removeEventListener('abort', onAbort);
+          resolve(value);
+        },
+        (error) => {
+          signal.removeEventListener('abort', onAbort);
+          reject(error);
+        }
+      );
+    });
+  };
   const listWrapper = async function list() {
     if (disposed) return originalList.apply(this, arguments);
     const options = arguments[0];
@@ -202,19 +228,22 @@ export function installScanCache(options) {
     }
     if (inflight !== null) {
       stats.listHits += 1;
-      return inflight;
+      return waitForCaller(inflight, signal);
     }
     stats.listMisses += 1;
+    const self = this;
+    const shared = options && options.signal === undefined ? options : { ...options };
+    if (shared !== options) shared.signal = new AbortController().signal;
     inflight = (async () => {
       try {
-        const value = await originalList.apply(this, arguments);
+        const value = await originalList.call(self, shared);
         listMemo = { at: Date.now(), value };
         return value;
       } finally {
         inflight = null;
       }
     })();
-    return inflight;
+    return waitForCaller(inflight, signal);
   };
 
   target.readGenerationHeader = headerWrapper;
