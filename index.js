@@ -20,6 +20,8 @@ import { planTrim } from './src/trim.js';
 import { planCompact } from './src/compact.js';
 import { installScanCache } from './src/scan-cache.js';
 import { createPageCache } from './src/page-cache.js';
+import { createCacheRefresh } from './src/cache-refresh.js';
+import { createLiveBuildDefer, DEFER_DEFAULTS } from './src/defer-live-build.js';
 import { createServeLog } from './src/serve-log.js';
 import { findRewindCuts, earliestCut, firstSeqOf, hiddenByCuts } from './src/rewind.js';
 
@@ -30,6 +32,14 @@ export const name = 'dsh-fastload';
 // through a stubbed session controller.
 export { wrapPageCache };
 export const inject = ['sessionController'];
+
+/**
+ * Marks the requests the idle refresher issues through the plugin's own wrapper.
+ * The wrapper refuses to serve them from the page cache: a refresh build must
+ * capture the live page, and a cache hit on that path would both skip the build
+ * and inflate the hit counters with reads no user made.
+ */
+const REFRESH_REQUEST = Symbol.for('dsh-fastload.refresh-request');
 
 /** Cache directory shared by the session-header index and the page cache. */
 function resolveCacheDir(config) {
@@ -85,6 +95,91 @@ function observeFirstFrame(result, startedAt) {
 }
 
 /**
+ * Debug-only event-loop probe. The gap between two consecutive setImmediate
+ * turns is `0.1ms`-ish on an idle loop and grows by exactly the synchronous
+ * work it had to wait for, so "max gap minus the smallest observed gap" is the
+ * stall the loop could not avoid. Only used when timing is on.
+ */
+function createLagProbe() {
+  let last = performance.now();
+  let max = 0;
+  let min = Infinity;
+  let slices = 0;
+  let stopped = false;
+  const tick = () => {
+    if (stopped) return;
+    const at = performance.now();
+    const gap = at - last;
+    last = at;
+    if (slices > 0) {
+      if (gap > max) max = gap;
+      if (gap < min) min = gap;
+    }
+    slices += 1;
+    setImmediate(tick);
+  };
+  setImmediate(tick);
+  return {
+    stop() {
+      stopped = true;
+      return {
+        maxMs: max,
+        minMs: min === Infinity ? 0 : min,
+        slices,
+        stallMs: max === 0 ? 0 : Math.max(0, max - (min === Infinity ? 0 : min)),
+      };
+    },
+  };
+}
+
+/**
+ * Positive evidence that a Session is quiet, or 'unknown'.
+ *
+ * A deferral is only allowed on 'idle'. A missing Agent service, a thrown
+ * lookup or an unrecognised status all report 'unknown', which keeps the
+ * original timing: "there is a cache hit" is not evidence that no Agent is
+ * about to write to the same Session.
+ */
+function agentStatusReader(ctx, c) {
+  const find = () => {
+    try {
+      if (typeof c.get === 'function') {
+        const service = c.get('agents');
+        if (service && typeof service.get === 'function') return service;
+      }
+    } catch {}
+    for (const holder of [ctx, c]) {
+      try {
+        const service = holder && holder.agents;
+        if (service && typeof service.get === 'function') return service;
+      } catch {}
+    }
+    return null;
+  };
+  const service = find();
+  if (!service) return () => 'unknown';
+  return (sessionId) => {
+    let agent;
+    try {
+      agent = service.get(sessionId);
+    } catch {
+      return 'unknown';
+    }
+    // No Agent instance exists for this Session, so nothing is running for it.
+    if (agent === undefined || agent === null) return 'idle';
+    let status;
+    try {
+      status = agent.status;
+    } catch {
+      return 'unknown';
+    }
+    if (status === 'running') return 'running';
+    if (status === 'idle') return 'idle';
+    return 'unknown';
+  };
+}
+
+/**
  * Serve a stored opening page before the live history build finishes.
  *
  * The live `follow` stream is still started immediately, so activation and the
@@ -94,122 +189,209 @@ function observeFirstFrame(result, startedAt) {
  * ends the stream rather than emitting a second opening frame.
  */
 function wrapPageCache(result, options) {
-  const { cache, sessionId, variant, config, state, log } = options;
+  const { cache, sessionId, variant, config, state, log, defer, signal, request } = options;
   if (!result || typeof result[Symbol.asyncIterator] !== 'function') return result;
 
   return (async function* () {
-    const pullAt = process.hrtime.bigint();
-    let probe = { hit: false };
+    // Timing is debug-only: one boolean check and no clock reads when
+    // DSH_FASTLOAD_DEBUG is off, so the default path keeps its exact cost.
+    const timed = config.debug === true;
+    const epoch = timed ? Date.now() : 0;
+    const timeStart = timed ? performance.now() : 0;
+    const timings = timed
+      ? { lookupMs: 0, sendMs: 0, resumeMs: 0, deferMs: 0, liveMs: 0, stallMs: 0, lagSlices: 0, wallSend: 0, wallBuild: 0 }
+      : null;
+    const ms = (value) => (Number.isFinite(value) ? value.toFixed(1) : '0.0');
+    // Started before the cache lookup so the probe has ticks to compare by the
+    // time the live build runs: a build that blocks the Host loop shows up as
+    // one wide gap. Debug-only; stopped in `finally` if the stream ends early.
+    let lag = null;
+    let lagStats = null;
+    // Idempotent: the first live frame reads the probe, and the outer
+    // cleanup may run again; that cleanup also covers the cached yield,
+    // where the consumer can return without ever starting the live loop.
+    const stopLag = () => {
+      if (lag === null || lagStats !== null) return lagStats;
+      lagStats = lag.stop();
+      return lagStats;
+    };
     try {
-      probe = await cache.lookup(sessionId, variant);
-    } catch {}
+      // Started before the cache lookup so the probe has ticks to compare
+      // by the time the live build runs: a build that blocks the Host loop
+      // shows up as one wide gap. Debug-only.
+      lag = timings ? createLagProbe() : null;
+      const pullAt = process.hrtime.bigint();
+      let probe = { hit: false };
+      try {
+        probe = await cache.lookup(sessionId, variant);
+      } catch {}
+      if (timings) timings.lookupMs = performance.now() - timeStart;
 
-    const cached = probe && probe.hit ? probe.opening : null;
-    const cachedCursor = cached && Number.isFinite(cached.cursor) ? cached.cursor : null;
-    const cachedRevision = cached && cached.assistantStream ? cached.assistantStream.revision : undefined;
-    let served = false;
+      const cached = probe && probe.hit ? probe.opening : null;
+      const cachedCursor = cached && Number.isFinite(cached.cursor) ? cached.cursor : null;
+      const cachedRevision = cached && cached.assistantStream ? cached.assistantStream.revision : undefined;
+      let served = false;
 
-    if (cached) {
-      served = true;
-      state.pageCacheHits += 1;
-      log?.write(
-        'hit sid=' + sessionId + ' cursor=' + cachedCursor + ' records=' +
-          (Array.isArray(cached.records) ? cached.records.length : -1) + ' hasMore=' + cached.hasMore
-      );
-      if (config.debug) {
-        const totalMs = Number(process.hrtime.bigint() - pullAt) / 1e6;
-        process.stderr.write('[fl] page cache ready ' + totalMs.toFixed(1) + 'ms\n');
+      if (cached) {
+        served = true;
+        state.pageCacheHits += 1;
+        log?.write(
+          'hit sid=' + sessionId + ' cursor=' + cachedCursor + ' records=' +
+            (Array.isArray(cached.records) ? cached.records.length : -1) + ' hasMore=' + cached.hasMore
+        );
+        if (config.debug) {
+          const totalMs = Number(process.hrtime.bigint() - pullAt) / 1e6;
+          process.stderr.write('[fl] page cache ready ' + totalMs.toFixed(1) + 'ms\n');
+        }
+        if (config.debug) {
+          process.stderr.write('[fl] page cache served cursor=' + cachedCursor + ' records=' + (Array.isArray(cached.records) ? cached.records.length : -1) + '\n');
+        }
+        if (timings) timings.sendMs = performance.now() - timeStart;
+        yield cached;
       }
-      if (config.debug) {
-        process.stderr.write('[fl] page cache served cursor=' + cachedCursor + ' records=' + (Array.isArray(cached.records) ? cached.records.length : -1) + '\n');
+      // Consumer came back for the next frame: everything up to here was the
+      // cache read plus handing the bytes to the transport.
+      if (timings) {
+        timings.resumeMs = performance.now() - timeStart;
+        timings.wallSend = epoch + timings.sendMs;
       }
-      yield cached;
-    }
 
-    // Give the transport a turn to flush the cached page before the live
-    // history build starts competing for the same thread.
-    if (served) await new Promise((resolve) => setImmediate(resolve));
+      // Stage 5 (opt-in): a bounded, cancellable yield between the cached page
+      // and the live build. Off by default; a refused gate or any error leaves
+      // the stage-3 single setImmediate below untouched.
+      let deferral = null;
+      if (served && defer) {
+        try {
+          deferral = await defer.wait({ sessionId, request, cached, signal });
+        } catch {
+          deferral = null;
+        }
+      }
+      if (timings && deferral) timings.deferMs = Number(deferral.waitedMs) || 0;
 
-    let first = true;
-    const iterator = result[Symbol.asyncIterator]();
-    try {
-      for (;;) {
-        const step = await iterator.next();
-        if (step.done) return;
-        const frame = step.value;
+      if (served && !(deferral && deferral.deferred)) {
+        // Give the transport a turn to flush the cached page before the live
+        // history build starts competing for the same thread.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
 
-        if (first) {
-          first = false;
-          if (frame && frame.type === 'snapshot') {
-            log?.write(
-              'live sid=' + sessionId + ' records=' +
-                (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor +
-                ' hasMore=' + frame.hasMore + ' rev=' +
-                (frame.assistantStream ? frame.assistantStream.revision : '-')
-            );
-            if (served) {
-              const realCursor = Number.isFinite(frame.cursor) ? frame.cursor : null;
-              const realRevision = frame.assistantStream ? frame.assistantStream.revision : undefined;
-              const sameBaseline = realRevision === cachedRevision;
-              if (sameBaseline && realCursor !== null && cachedCursor !== null && realCursor >= cachedCursor) {
-                // The live page is windowed, so "cursor moved forward" alone does
-                // not prove the delta is complete. Only replay a delta that runs
-                // exactly from cached cursor + 1 through the live cursor.
-                let expected = cachedCursor + 1;
-                const delta = [];
-                for (const record of frame.records || []) {
-                  const event = record && record.event;
-                  const seq = event && event.seq;
-                  if (!Number.isFinite(seq) || seq <= cachedCursor) continue;
-                  if (seq !== expected) { expected = -1; break; }
-                  delta.push(event);
-                  expected += 1;
+      if (timings) timings.wallBuild = epoch + (performance.now() - timeStart);
+      let first = true;
+      const iterator = result[Symbol.asyncIterator]();
+      try {
+        for (;;) {
+          const step = await iterator.next();
+          if (step.done) return;
+          const frame = step.value;
+
+          if (first) {
+            first = false;
+            if (timings) {
+              const now = performance.now();
+              timings.liveMs = now - timeStart;
+              const stats = stopLag();
+              timings.stallMs = stats.stallMs;
+              timings.lagSlices = stats.slices;
+              const line =
+                'timing sid=' + sessionId + ' lookup=' + ms(timings.lookupMs) +
+                  ' send=' + ms(timings.sendMs) + ' resume=' + ms(timings.resumeMs) +
+                  ' defer=' + ms(timings.deferMs) + ' live=' + ms(timings.liveMs) +
+                  ' stall=' + ms(timings.stallMs) + ' lagSlices=' + timings.lagSlices +
+                  ' total=' + ms(now - timeStart) +
+                  ' wallSend=' + Math.round(timings.wallSend) +
+                  ' wallBuild=' + Math.round(timings.wallBuild) +
+                  ' deferReason=' + (deferral ? deferral.reason : 'off');
+              log?.write(line);
+              if (config.debug) process.stderr.write('[fl] ' + line + '\n');
+              state.pageCacheTiming = {
+                sid: sessionId,
+                lookupMs: timings.lookupMs,
+                sendMs: timings.sendMs,
+                resumeMs: timings.resumeMs,
+                deferMs: timings.deferMs,
+                liveMs: timings.liveMs,
+                stallMs: timings.stallMs,
+                lagSlices: timings.lagSlices,
+                totalMs: now - timeStart,
+                wallSend: Math.round(timings.wallSend),
+                wallBuild: Math.round(timings.wallBuild),
+                deferReason: deferral ? deferral.reason : 'off',
+              };
+            }
+            if (frame && frame.type === 'snapshot') {
+              log?.write(
+                'live sid=' + sessionId + ' records=' +
+                  (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor +
+                  ' hasMore=' + frame.hasMore + ' rev=' +
+                  (frame.assistantStream ? frame.assistantStream.revision : '-')
+              );
+              if (served) {
+                const realCursor = Number.isFinite(frame.cursor) ? frame.cursor : null;
+                const realRevision = frame.assistantStream ? frame.assistantStream.revision : undefined;
+                const sameBaseline = realRevision === cachedRevision;
+                if (sameBaseline && realCursor !== null && cachedCursor !== null && realCursor >= cachedCursor) {
+                  // The live page is windowed, so "cursor moved forward" alone does
+                  // not prove the delta is complete. Only replay a delta that runs
+                  // exactly from cached cursor + 1 through the live cursor.
+                  let expected = cachedCursor + 1;
+                  const delta = [];
+                  for (const record of frame.records || []) {
+                    const event = record && record.event;
+                    const seq = event && event.seq;
+                    if (!Number.isFinite(seq) || seq <= cachedCursor) continue;
+                    if (seq !== expected) { expected = -1; break; }
+                    delta.push(event);
+                    expected += 1;
+                  }
+                  if (expected !== -1 && expected - 1 === realCursor) {
+                    for (const event of delta) yield { type: 'event', event };
+                    log?.write('replay sid=' + sessionId + ' events=' + delta.length + ' from=' + cachedCursor);
+                    continue;
+                  }
+                  log?.write(
+                    'drop sid=' + sessionId + ' reason=gap cached=' + cachedCursor +
+                      ' live=' + realCursor + ' expected=' + expected
+                  );
+                  cache.evict(probe.key);
+                  state.pageCacheDropped += 1;
+                  throw new Error('fastload page cache is stale: the delta after cursor ' + cachedCursor + ' is incomplete');
                 }
-                if (expected !== -1 && expected - 1 === realCursor) {
-                  for (const event of delta) yield { type: 'event', event };
-                  log?.write('replay sid=' + sessionId + ' events=' + delta.length + ' from=' + cachedCursor);
-                  continue;
-                }
-                log?.write(
-                  'drop sid=' + sessionId + ' reason=gap cached=' + cachedCursor +
-                    ' live=' + realCursor + ' expected=' + expected
-                );
+                // The live page disagrees with the cached one (or the assistant
+                // stream baseline moved), and a second opening frame is not
+                // allowed. Fail the stream so the client resyncs from scratch;
+                // the stale file is already gone, so the retry takes the plain
+                // path.
                 cache.evict(probe.key);
                 state.pageCacheDropped += 1;
-                throw new Error('fastload page cache is stale: the delta after cursor ' + cachedCursor + ' is incomplete');
+                log?.write(
+                  'drop sid=' + sessionId + ' live=' + realCursor + ' cached=' + cachedCursor +
+                    ' baseline=' + realRevision + '/' + cachedRevision
+                );
+                if (config.debug) {
+                  process.stderr.write('[fl] page cache dropped cursor=' + realCursor + ' cached=' + cachedCursor + ' baseline=' + realRevision + '/' + cachedRevision + '\n');
+                }
+                throw new Error('fastload page cache is stale: baseline moved ' + realRevision + '/' + cachedRevision);
               }
-              // The live page disagrees with the cached one (or the assistant
-              // stream baseline moved), and a second opening frame is not
-              // allowed. Fail the stream so the client resyncs from scratch;
-              // the stale file is already gone, so the retry takes the plain
-              // path.
-              cache.evict(probe.key);
-              state.pageCacheDropped += 1;
-              log?.write(
-                'drop sid=' + sessionId + ' live=' + realCursor + ' cached=' + cachedCursor +
-                  ' baseline=' + realRevision + '/' + cachedRevision
-              );
-              if (config.debug) {
-                process.stderr.write('[fl] page cache dropped cursor=' + realCursor + ' cached=' + cachedCursor + ' baseline=' + realRevision + '/' + cachedRevision + '\n');
+              if (probe && probe.revision) {
+                cache.store(sessionId, probe.revision, probe.key, frame);
+                log?.write(
+                  'store sid=' + sessionId + ' records=' +
+                    (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor
+                );
               }
-              throw new Error('fastload page cache is stale: baseline moved ' + realRevision + '/' + cachedRevision);
-            }
-            if (probe && probe.revision) {
-              cache.store(sessionId, probe.revision, probe.key, frame);
-              log?.write(
-                'store sid=' + sessionId + ' records=' +
-                  (Array.isArray(frame.records) ? frame.records.length : -1) + ' cursor=' + frame.cursor
-              );
             }
           }
-        }
 
-        yield frame;
+          yield frame;
+        }
+      } finally {
+        stopLag();
+        try {
+          await iterator.return?.();
+        } catch {}
       }
     } finally {
-      try {
-        await iterator.return?.();
-      } catch {}
+      stopLag();
     }
   })();
 }
@@ -396,6 +578,7 @@ function reuseState() {
     pageCacheHits: 0,
     pageCacheDropped: 0,
     rewindExtends: 0,
+    idleRefresh: null,
     error: null,
   };
   globalThis.__DSH_FASTLOAD__ = state;
@@ -411,9 +594,17 @@ function installTarget(service) {
   return (service && service[CORDIS_ORIGINAL]) || service;
 }
 
-export function apply(ctx) {
+/**
+ * @param {object} ctx cordis context
+ * @param {object} [options] test seam only ({refresh: {timings, timers,
+ *   probeLoad, now}}); the Host never passes a second argument.
+ */
+export function apply(ctx, options) {
   const config = readConfig(process.env);
+  const refreshOptions = options && options.refresh ? options.refresh : null;
   const state = reuseState();
+  if (state.installed !== true) state.idleRefresh = null;
+  if (state.installed !== true) state.deferLiveBuild = null;
   state.config = config;
   state.installed = false;
   state.error = null;
@@ -427,7 +618,11 @@ export function apply(ctx) {
     ', client auto-fill=on, scan cache=' + (config.scanCache ? 'on' : 'off') +
     ', page cache=' + (config.pageCache ? 'on' : 'off') +
     ', rewind=' + (config.rewindAware ? 'aware' : 'plain') +
-    ', replay streams=' + (config.stripStream ? 'stripped' : 'kept');
+    ', replay streams=' + (config.stripStream ? 'stripped' : 'kept') +
+    ', idle refresh=' + (config.idleCacheRefresh ? 'on' : 'off') +
+    // Only mentioned when opted in, so the default banner is byte-identical
+    // to the stage-3 branch.
+    (config.deferLiveBuild ? ', deferred live build=on' : '');
   try {
     ctx.logger?.info?.(banner);
   } catch {}
@@ -462,10 +657,16 @@ export function apply(ctx) {
 
     // P5: persisted opening page, keyed by the persistence revision so it can
     // only ever serve the exact log it was built from.
+    // Shared by the page cache and the idle refresher: both key on the
+    // persistence revision, so both need the same service handle.
+    let persistence = null;
+    try {
+      persistence = typeof c.get === 'function' ? c.get('sessionPersistence') : undefined;
+    } catch {}
+
     let pageCache = null;
     if (config.pageCache) {
       try {
-        const persistence = typeof c.get === 'function' ? c.get('sessionPersistence') : undefined;
         if (persistence && typeof persistence.stat === 'function') {
           pageCache = createPageCache({
             persistence,
@@ -494,7 +695,6 @@ export function apply(ctx) {
     // header on each list call (and across restarts via a validated index).
     if (config.scanCache) {
       try {
-        const persistence = typeof c.get === 'function' ? c.get('sessionPersistence') : undefined;
         if (persistence) {
           const cache = installScanCache({
             persistence,
@@ -530,10 +730,38 @@ export function apply(ctx) {
       // wrapper into a passthrough instead of leaving the old page size in the
       // chain and re-applying it after the next install.
       let active = true;
+      // Stage 5: opt-in, cancellable yield before the live build. Constructed
+      // per installation so its pending timers die with the wrapper.
+      let liveBuildDefer = null;
+      if (config.deferLiveBuild) {
+        const deferOptions = options && options.defer ? options.defer : null;
+        liveBuildDefer = createLiveBuildDefer({
+          budgetMs: deferOptions && Number.isFinite(deferOptions.budgetMs)
+            ? deferOptions.budgetMs
+            : DEFER_DEFAULTS.budgetMs,
+          maxSlices: deferOptions && Number.isInteger(deferOptions.maxSlices)
+            ? deferOptions.maxSlices
+            : undefined,
+          timers: deferOptions ? deferOptions.timers : undefined,
+          now: deferOptions ? deferOptions.now : undefined,
+          statusOf: deferOptions && typeof deferOptions.statusOf === 'function'
+            ? deferOptions.statusOf
+            : agentStatusReader(ctx, c),
+          log: serveLog,
+        });
+        state.deferLiveBuild = liveBuildDefer.report();
+      }
       const wrapped = function follow(request, signal) {
         if (!active) return original.call(this, request, signal);
+        const refreshing = request != null && request[REFRESH_REQUEST] === true;
         const next = { ...request };
+        if (refreshing) delete next[REFRESH_REQUEST];
         const initial = isInitialPage(next, config);
+        // A newer follow for the same Session owns the live stream: drop any
+        // yield that has not started its build yet instead of letting a stale
+        // timer delay this request. Internal refresh builds do not count.
+        const requestSessionId = sessionIdOf(next);
+        if (liveBuildDefer && !refreshing && requestSessionId) liveBuildDefer.arrive(requestSessionId);
 
         if (initial) {
           next.maxMessages = config.maxMessages;
@@ -556,7 +784,7 @@ export function apply(ctx) {
           ? wrapFirstSnapshot(result, config, state, ctx, extension)
           : result;
         const streamed = config.debug ? observeFirstFrame(trimmed, startedAt) : trimmed;
-        const sessionId = initial ? sessionIdOf(next) : null;
+        const sessionId = initial ? requestSessionId : null;
         if (serveLog) {
           try {
             serveLog.write(
@@ -569,7 +797,10 @@ export function apply(ctx) {
             );
           } catch {}
         }
-        if (!initial || !pageCache || !sessionId) return streamed;
+        // A refresh build must reach the live history build and its capture
+        // must be the one the refresher verifies; serving it from the cache
+        // here would both skip that build and count a phantom hit.
+        if (!initial || !pageCache || !sessionId || refreshing) return streamed;
         return wrapPageCache(streamed, {
           cache: pageCache,
           sessionId,
@@ -577,6 +808,11 @@ export function apply(ctx) {
           config,
           state,
           log: serveLog,
+          defer: liveBuildDefer,
+          signal,
+          // The gate re-checks the request it is deferring for: an activating
+          // or paged request is never deferred.
+          request: next,
         });
       };
 
@@ -584,7 +820,97 @@ export function apply(ctx) {
       target.__dshFastload = true;
       state.installed = true;
 
+      // Stage 3: while a Session is quiet, walk the same read path a client
+      // open takes — this wrapper, assistantStream on, activate off — and store
+      // the page under the persistence revision it was built from. Everything
+      // here is additive: a missing capability or a thrown error leaves the
+      // refresher inert and the open path untouched.
+      let releaseRefresh = () => {};
+      if (config.idleCacheRefresh) {
+        try {
+          const refresh = createCacheRefresh({
+            cache: pageCache,
+            persistence,
+            variant: pageVariant(
+              {
+                maxMessages: config.maxMessages,
+                turnWindow: { minMessages: config.minMessages, minTurns: config.minTurns },
+                assistantStream: true,
+              },
+              config
+            ),
+            follow(request, signal) {
+              if (!active) {
+                throw new Error('dsh-fastload: sessionController.follow wrapper is retired');
+              }
+              return wrapped.call(target, request, signal);
+            },
+            tag(request) {
+              request[REFRESH_REQUEST] = true;
+            },
+            // The idle path must see an Agent that was already running when
+            // this plugin loaded, not only later agent/status events.
+            statusOf: agentStatusReader(ctx, c),
+            log: serveLog,
+            logger: ctx.logger,
+            debug: config.debug,
+            timings: refreshOptions ? refreshOptions.timings : undefined,
+            timers: refreshOptions ? refreshOptions.timers : undefined,
+            probeLoad: refreshOptions ? refreshOptions.probeLoad : undefined,
+            now: refreshOptions ? refreshOptions.now : undefined,
+          });
+          state.idleRefresh = refresh.report;
+          const offs = [];
+          releaseRefresh = () => {
+            for (const off of offs) {
+              if (typeof off !== 'function') continue;
+              try {
+                off();
+              } catch {}
+            }
+            refresh.dispose();
+          };
+          const listen = typeof ctx.on === 'function'
+            ? ctx.on.bind(ctx)
+            : typeof c.on === 'function' ? c.on.bind(c) : null;
+          if (refresh.report.active && !listen) {
+            refresh.dispose();
+            state.idleRefresh = { ...refresh.report, disabledReason: 'cordis event api unavailable' };
+          } else if (refresh.report.active) {
+            offs.push(listen('session/event', (session) => {
+              if (session && typeof session.id === 'string') refresh.noteActivity(session.id);
+            }, { global: true }));
+            offs.push(listen('agent/status', (payload) => {
+              const agent = payload && payload.agent;
+              if (!agent || typeof agent.id !== 'string') return;
+              refresh.noteAgentStatus(agent.id, typeof payload.status === 'string' ? payload.status : '');
+            }, { global: true }));
+            offs.push(listen('session/disposed', (session) => {
+              if (session && typeof session.id === 'string') refresh.noteDisposed(session.id);
+            }, { global: true }));
+          }
+        } catch (error) {
+          // A partly installed subscription must not survive the failure: an
+          // orphaned listener would keep starting idle refreshes behind a
+          // report that already says disabled. Release before publishing.
+          try {
+            releaseRefresh();
+          } catch {}
+          state.idleRefresh = {
+            active: false,
+            disabledReason: String((error && error.message) || error),
+          };
+          if (config.debug) process.stderr.write('[fl] idle refresh error: ' + error + '\n');
+        }
+      }
+
       return () => {
+        try {
+          releaseRefresh();
+        } catch {}
+        try {
+          liveBuildDefer?.dispose();
+        } catch {}
         if (target.follow === wrapped) {
           if (ownDescriptor) Object.defineProperty(target, 'follow', ownDescriptor);
           else delete target.follow;

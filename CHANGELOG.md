@@ -7,8 +7,85 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **启动预热要求可用的 `mainReference`。** `armRestoreSignal` 现在把 `uiWorkspace.mainReference` 的对象形状与可读的字符串 `sessionId` 一并列为启动条件；缺失时预热直接标记 `skipped`（`main-reference-unavailable`），不再订阅选择信号或排队 follow，避免与原生恢复重复构建。回归测试：`skips restore prewarm when uiWorkspace has no live main reference`。
+- **空闲刷新构建从入口即可取消。** 构建一开始就创建并登记 `AbortController`；`cache.lookup`、settle 等待、每次 `statRevision` 与首帧读取之后都检查取消与 `active`，会话在准备阶段被销毁时不再 follow 或写缓存，`report.aborted` 只计一次，超时仍按失败计数。回归测试：`a dispose during the page lookup cancels the build before it follows or stores`。
+- **构建前读取 Agent 实时状态。** `createCacheRefresh` 接受可选 `statusOf(sessionId)`，`index.js` 传入 `agentStatusReader`；构建入口与 settle 之后各查询一次，`running` 时跳过 follow 并按 `idleMs` 重新排期，`idle`/`unknown` 或查询抛错保持原有放行行为，事件路径的 `agentStatus` 检查不变。回归测试：`reads the live Agent state when the event map is empty`。
+- **页缓存命中后关闭流不再遗留调试探针。** `DSH_FASTLOAD_DEBUG=1` 且客户端只读取缓存首帧就 `return()` 时，整个生成器（含缓存 yield）都由 `finally` 停止探针，避免递归 `setImmediate` 持续占用 Host。回归测试：`closing after the cached frame stops the debug lag probe`。
+- **启动预热先订阅再发起 follow。** `armRestoreSignal` 先建立 selection 订阅，确认状态仍为 `waiting` 后才排队；订阅抛错时预热标记 failed，不会留下已启动的 follow。回归测试：`does not prewarm when the selection subscription throws`。
+- **超时的页缓存读取有界关闭迭代器。** `readOpening` 的 `return()` 最多等待 250 ms 并与超时竞速，随后释放全局 inFlight，超时仍计入失败。回归测试：`a timed-out opening releases the in-flight slot when return never settles`。
+- **构建在 settle/stat 之后重新检查 Agent 状态。** 若期间 Agent 转为 running，则跳过 follow 并重新排期。回归测试：`re-checks Agent status after the settle wait`。
+- **空闲刷新注册失败时释放已安装监听。** `agent/status` 或 `session/disposed` 订阅抛错时立即 `releaseRefresh()`，再发布 disabled 状态。回归测试：`releases idle refresh listeners when a later registration throws`。
+- **异步探测后重新确认队首。** 探测期间队首 Session 被 dispose 或 Agent 转忙而移出队列时，pump 不再误删下一项并构建过期队首，而是重新循环处理当前队首。回归测试：`does not build a cancelled queue head after the load probe`。
+- **插件卸载时停止已挂载的渐进懒加载组件。** 还原 slot `component` 不会卸载已渲染的 `FastloadLazyFlow`；现在每个挂载 wrapper 都登记同步 stop 函数，disposer 会取消 rAF/idle、移除 `keydown`/`beforematch` 监听，并让存活的 wrapper 立即回退原生渲染，不再补挂或执行 `flushSync`。回归测试：`the disposer stops mounted wrappers before restoring the slot`。
+- **销毁会话时中止在飞构建。** `noteDisposed` 在删除 `runningBuilds` 条目前先 abort 对应 controller，已销毁会话不再占用全局唯一构建槽，也不会在首帧读取释放后继续写缓存。回归测试：`aborts an in-flight capture when the session is disposed`。
+
 ### 新增
 
+- **延后真实 follow 改为默认开启（阶段 8 后续决定，未发布）。**
+  `DSH_FASTLOAD_DEFER_LIVE_BUILD` 默认值从 `0` 改为 `1`；`0`/`off`/`no` 仍关闭。
+  DSH 0.2.2-rc.1 的真实点击打开带 `activate=true`，因此点击路径不会延后，也没有可测
+  收益；该开关只对预热、恢复等 `activate:false` 的被动请求最多延后 16 ms。设置
+  `DSH_FASTLOAD_DEFER_LIVE_BUILD=0` 即恢复阶段 3 的时序。
+- **阶段 4 复审 PoC：折叠组懒挂载（实验，Web 端，默认关闭）。** 新增
+  `DSH_FASTLOAD_LAZY_GROUPS`（`localStorage['dsh-fastload.lazy-groups']='1'` 或
+  `window.__DSH_FASTLOAD_LAZY_GROUPS__=true`）。只把已完成折叠 process group 里的
+  tool-call 节点换成纯文本占位，group 外壳与锚点不变；assistant-step、运行中、交错输入、
+  待审批、异常一律走原生 `renderSlot`。实现读取私有
+  `ctx.slots.entries('conversation.chat.flow')` 并临时替换 `entry.component`，能力检测
+  失败就回退 stock，卸载时仅在仍为本插件 wrapper 时还原。warm host 交替 A/B（n=6）：
+  standard normal 点击→首行 481.6→428.6 ms（−11.0%）、DOM 8598→4888；long
+  265.9→237.0 ms（−10.9%）、DOM 4114→2869；long 首行长任务 142.5→118.5 ms，但首行后
+  多出约 39 ms 的第二个 Long Task（settled 142.5→181.5 ms），总长任务可能增加。
+  逐预设矩阵、像素等价、锚点与翻页回归见 `docs/research/stage4-revisit.md`；真实
+  `FindInPage` 已验证：结构性揭示通过，但活动匹配/高亮/滚动丢失，且存在误报/漏报。
+  节点局部状态保留未验证；默认关闭，仅作为性能实验，不能作为 Ctrl+F 兼容方案。
+- **阶段 4 复审对照：渐进补挂（实验，Web 端，默认关闭，本轮 NO-GO）。** 新增
+  `DSH_FASTLOAD_LAZY_PROGRESSIVE`（`localStorage['dsh-fastload.lazy-progressive']='1'`
+  或 `window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__=true`），两者同时开启时渐进优先。首帧
+  先占位，双 `requestAnimationFrame` 后用 `requestIdleCallback` 分片补回原生节点，
+  Ctrl/Cmd+F 捕获阶段用 `flushSync` 全量补回。normal/long 首开收益与永久占位同量级
+  （normal 576.9→513.8 ms，long 325.4→318.9 ms，n=6），最终 DOM/文本/滚动与 stock 一致；
+  normal 补挂约 0.79–0.90 s、long 约 0.13–0.19 s，首开分片最长 19.9 ms。但在 turn rail
+  跳转到未加载历史时补挂 12.9 s、产生 93 个 69–110 ms Long Task，同一场景 stock 只有
+  1 个 781 ms 任务，按后台长任务判 **NO-GO**，仅保留作对照。
+
+- **阶段 8 最终集成、回归与发布准备（本地分支，未发布）。** 把阶段 2+3+6 集成头与阶段 5
+  延后构建、阶段 0 基线、阶段 4 CSS NO-GO 报告合并为 `feat/optimization-final`。13 个可执行
+  回归场景中 12 通过、0 失败、1 未执行（子代理来源会话没有 workspace 行，侧栏不可达）；缓存
+  命中路径在同一隔离 fixture 与 DSH 0.2.2-rc.1 上各跑 10 次，对比“全部开关关闭 / 全部开启”
+  并列出阶段 0 stock 数字。阶段 7 的 7A 客户端校验优化与 7B 私有尾部读取器因没有硬数据
+  **不实施**。其他实验开关仍默认关闭（defer 例外，见上一条）；禁用和卸载会经 disposer 还原 follow，热重载依赖
+  宿主调用 disposer、本阶段未做真机验证。完整表格、限制和
+  未执行项见 `docs/research/plugin-optimization-final-report.md`。
+- **客户端核心/诊断分层（阶段 6，Web 端）。** 默认路径不再遍历 React Fiber 采样、
+  不保留错误/拒绝/flush/build 日志数组、不包装 `console.error`、不挂载
+  `window.__DSH_FASTLOAD__`，也不注册 7 个仅用于 instrument 的延时器。首次导航
+  实测注册的 `setTimeout` 8 → 1、事件监听 9 → 7（只保留 P6 与输入空闲所需的 7 个
+  document 监听）。补页、Load older 锚点补偿、`/rewind` 空白自愈、错误恢复、P6
+  与启动预热的行为和节奏常量（900/700/8/1500 ms）都不变。诊断开关为
+  `localStorage['dsh-fastload.diagnostics'] = '1'` 或
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`，**默认关闭**；原型 patch 还需同时
+  打开 `dsh-fastload.debug`。`client.js` 源码 1916 → 1962 行、94,098 → 96,408 字节，
+  增量来自开关、注释与 `watchEmpty` 的 DOM 先行判定，运行时注册量下降。首次导航
+  脚本执行耗时未在真实浏览器中测量。
+- **空闲页缓存预热（阶段 3，Host 端，默认关闭）。** 会话静默约 4 秒后，宿主用只读
+  `session/follow({ activate: false })` 复用现有建页/裁剪流程，把首屏写入 P5 页缓存。
+  构建前后各读一次 `sessionPersistence.stat` 的 revision，不一致就丢弃重建，避免把旧页
+  发布到新 revision；同一 session 去重、全局并发 1，Agent 忙碌或 Host 事件循环延迟时推迟。
+  刷新请求带内部标记，不经过页缓存服务、不计入缓存命中；不激活 Agent、不写 session
+  store、不改原始日志。用 `DSH_FASTLOAD_IDLE_CACHE_REFRESH=1` 开启；真实首开收益本次
+  未执行测量。
+- **延后真实 follow（阶段 5，Host 端，默认关闭）。** 页缓存命中且请求为初始页、
+  `activate !== true`、`assistantStream` 无进行中的 attempt、Agent 已知空闲时，缓存帧发出后
+  把真实 `follow` 的构建延后最多 16 ms（切片调度，同 session 新请求、abort 或 Agent 转忙
+  立即取消）；任一条件不满足或状态无法判断都保持原时序，延后期间出错回退到阶段 3 的单次
+  `setImmediate`。默认关闭时时序、字节和日志与阶段 3 一致；`DSH_FASTLOAD_DEBUG=1` 时
+  `serve.log` 增加 `timing` 行（`lookup/send/resume/defer/live/build/stall`），默认路径不读
+  时钟。A/B 实测（最终每组 8 次命中，另有每组 16 次的前置块）：真实构建约 4–5 ms，真实
+  首帧在缓存帧发出后 11–20 ms 到达，首行在发出后约 170 ms 才出现，未观察到与首帧绘制的
+  竞争；开关默认关闭，暂不建议开启。
 - **会话预测性预加载（P6，Web 端）。** 鼠标悬停或键盘聚焦侧栏会话行 150 ms 后，
   客户端用 `session/follow({ activate: false })` 预建首屏页并落页缓存；真实点击
   直接命中缓存。被动读取不会激活 Agent、不写会话；队列最多 4 个、串行执行，
@@ -17,6 +94,15 @@
   点击到首行 337 ms → 110 ms，Host 日志确认预热请求 `activate=false`、
   点击请求 `activate=true` 且命中页缓存。可用
   `localStorage['dsh-fastload.prewarm'] = '0'` 或 `window.__DSH_FASTLOAD_PREWARM__ = false` 关闭。
+- **启动预热（阶段 2，Web 端，默认关闭）。** 页面启动时读取
+  `localStorage['dsh.sessions.current']`，在 workspace / sessions 列表仍在加载时用
+  同一套只读 `activate: false` follow 预建上次会话的首屏页，不等待列表、不写选择、
+  不导航、不建正式 Session。解析失败、空值、子代理地址、已删除/空白会话或拿不到
+  UI 选择信号时静默跳过；原生恢复开始打开同一会话（或用户改选）时取消尚未完成的
+  预热，只中止本插件自己的只读流。与 P6 共用串行队列和 10 分钟 TTL；成功预热后
+  同一标签页 60 秒内不重复。开关与 P6 极性相反：
+  `localStorage['dsh-fastload.restore-prewarm'] = '1'` 或
+  `window.__DSH_FASTLOAD_RESTORE_PREWARM__ = true` 才开启。真实浏览器基准未执行。
 
 ## [0.3.1] - 2026-11-12
 

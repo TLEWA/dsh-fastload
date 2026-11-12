@@ -45,6 +45,19 @@ firstAnchor 看起来很快，实际上是一个空页。
   只预热一次；延迟窗口内移开指针会取消，已经开始的预热会跑完（只读、不激活）。
   `localStorage['dsh-fastload.prewarm'] = '0'` 或
   `window.__DSH_FASTLOAD_PREWARM__ = false` 可关闭。
+- 启动预热：页面启动时读取 `localStorage['dsh.sessions.current']`，在 workspace /
+  sessions 列表仍加载时，用同一个只读的 `activate: false` follow 预建上次会话的
+  首屏页。解析失败、空选择、子代理地址、已删除/空白会话或拿不到 UI 选择信号时
+  静默跳过；不等列表 ready、不写选择、不导航、不建正式 Session。原生恢复开始
+  打开同一会话（或用户改选别的会话）时取消尚在等待的预热；只中止本插件自己
+  发起的只读流，正式打开的流不会被中断。成功后同一标签页 60 秒内不重复预热。
+  与悬停预加载共用串行队列和 10 分钟 TTL，但**默认关闭**：每次页面加载多一次
+  首屏读取，只有显式开启才值得。
+- 诊断分层：Fiber 采样、assembler/Builder 探针、conversation/session 深度快照、
+  console 包装和 7 个仅用于埋点的延时器默认全部不运行，`window.__DSH_FASTLOAD__`
+  也不挂载。需要取证时打开 `localStorage['dsh-fastload.diagnostics'] = '1'`（或
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`）；原型 patch 还要叠加
+  `dsh-fastload.debug`。关闭诊断不改变补页、空白自愈、错误恢复和两种预热。
 - 会话头索引：`session/list` 对未变化的会话文件直接复用上次解析出的 header，
   并把一次启动内的重复列表请求合成一次；索引写入 1.5 秒防抖、原子替换，
   文件大小或 mtime 变了自然失效。
@@ -78,6 +91,8 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_SCAN_CACHE` | `1` | 会话头索引与列表 TTL memo；`0` 恢复每次全量读 header。 |
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | 首帧剥离回放用的 `data.stream`。 |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | 持久化首屏快照。 |
+| `DSH_FASTLOAD_IDLE_CACHE_REFRESH` | `0` | 空闲时用只读 follow（`activate: false`）预热页缓存；不写 session store、不改原始日志，构建前后校验 `revision`。 |
+| `DSH_FASTLOAD_DEFER_LIVE_BUILD` | `1` | 页缓存命中后把真实 follow 延后最多 16 ms，让缓存首帧先绘制；默认开启。0.2.2-rc.1 的真实点击打开带 `activate=true`，点击路径实际不生效；只影响 `activate:false` 的被动请求（预热/恢复）。设为 `0` 关闭（见 `docs/design.md`）。 |
 | `DSH_FASTLOAD_REWIND_AWARE` | `1` | 初始页被 `/rewind` 全部隐藏时向前扩一页。 |
 | `DSH_FASTLOAD_SERVE_LOG` | `1` | 在缓存目录写 `serve.log`（每次 follow 一行，512 KiB 轮转）。 |
 | `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | 页缓存总量上限（96 MiB，下限 1 MiB）。 |
@@ -85,8 +100,94 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_CACHE_DIR` | 空 | 缓存目录；空表示 `$DSH_HOME/cache/dsh-fastload`。 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条 DSH 日志。 |
 
-Web 端还有一个不进环境变量的开关：`localStorage['dsh-fastload.prewarm'] = '0'`
-（或 `window.__DSH_FASTLOAD_PREWARM__ = false`）关闭会话预测性预加载，默认开启。
+延后默认开启，只有缓存确实命中、请求为初始页（无 `beforeSeq`/`throughSeq`）、
+`activate !== true`、`assistantStream` 没有进行中的 attempt，且能确认 Agent 空闲时才生效。
+同 session 新请求、abort 或 Agent 转忙都会取消尚未执行的延后；延后期间出错回退到原时序。
+0.2.2-rc.1 的用户点击打开会传 `activate=true`，因此点击路径不会延后，实际只覆盖预热、恢复
+等被动请求，且最多 16 ms。阶段 5 的 A/B 实测未发现真实 follow 与首帧绘制之间的可测竞争；
+默认开启保留为随客户端时序复验的保守时序，设置 `DSH_FASTLOAD_DEFER_LIVE_BUILD=0` 即可
+恢复阶段 3 的时序、字节和日志。
+
+Web 端还有五个不进环境变量的开关；前两个极性相反，别写反：
+
+- `localStorage['dsh-fastload.prewarm'] = '0'`（或
+  `window.__DSH_FASTLOAD_PREWARM__ = false`）关闭会话悬停预测性预加载，**默认开启**。
+- `localStorage['dsh-fastload.restore-prewarm'] = '1'`（或
+  `window.__DSH_FASTLOAD_RESTORE_PREWARM__ = true`）开启启动预热，**默认关闭**。
+  缺省、空值或任何非 `'1'` 的字符串都不会开启它。
+- `localStorage['dsh-fastload.diagnostics'] = '1'`（或
+  `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`）开启 Web 端诊断取证层，**默认关闭**。
+  关闭时不遍历 React Fiber、不做深度对象快照、不保留错误日志数组、不包装
+  `console.error`、不注册仅诊断用的轮询和延时器；补页、自愈、错误恢复与 P6/启动
+  预热的行为和节奏常量都不变。原型 `instrument` 探针需要诊断与 `dsh-fastload.debug`
+  同时开启。
+- `localStorage['dsh-fastload.lazy-groups'] = '1'`（或
+  `window.__DSH_FASTLOAD_LAZY_GROUPS__ = true`）开启“永久占位”折叠组懒挂载实验，
+  **默认关闭**；只替换已完成折叠组里的 tool-call 占位。
+- `localStorage['dsh-fastload.lazy-progressive'] = '1'`（或
+  `window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__ = true`）开启“渐进补挂”对照实验，
+  **默认关闭**；两者同时开启时渐进模式优先。渐进模式在首帧后分片补回原生节点，
+  本轮在 turn rail / 未加载历史场景实测出严重后台长任务，判定 **NO-GO**，仅保留作对照。
+
+### 阶段 4 实验：折叠组懒挂载（默认关闭）
+
+本分支带两个默认关闭的 Web 端实验，均只改 `conversation.chat.flow` entry 的
+`component`，不新增槽位声明，也不改动会话日志、Host 协议或上游源码。
+
+#### 永久占位（permanent，可作条件 GO 的实验）
+
+把**已完成且折叠**的 process group 里的 `tool-call` 节点替换成纯文本占位，避免在
+首屏为隐藏内容挂载完整工具视图；group 外层（标题、统计、展开按钮、滚动锚点）仍由
+原生 `ChatGroupSeat` 渲染。
+
+- 开关：`localStorage['dsh-fastload.lazy-groups'] = '1'`（或
+  `window.__DSH_FASTLOAD_LAZY_GROUPS__ = true`），**默认关闭**。
+- 只处理 `node.kind === 'tool-call'`、所属 process 已 foldable 且当前 `open=false`、
+  `anchorSeq` 落在 `processStartSeq` 与 `answerAnchorSeq` 之间的节点；assistant-step、
+  turn-process、运行中、交错输入、待审批、异常和被强制展开的组一律委托原生
+  `renderSlot`。
+- 占位文本来自 `node.data` 的有界递归提取（最多 4000 字符），目的是让折叠组内的
+  文本仍留在 DOM 中；它不是原生折叠摘要的精确副本，可能包含折叠态不显示的原始
+  参数，也可能漏掉摘要里的措辞。真实 `FindInPage` 已验证：结构性揭示通过，但活动
+  匹配/高亮/滚动会丢失，且存在误报/漏报；不能作为 Ctrl+F 等价方案。
+- 展开时占位立即换回完整原生节点，再折叠时重新变占位。该路径会卸载节点视图，
+  节点内部的局部状态（如工具输出内的滚动位置、展开状态）不保证保留。
+- 实测（DSH 0.2.2-rc.1、headless Chrome 157、warm host、standard/compact/detailed，
+  normal/long 各 6 次交替 A/B）：normal 点击→首行 481.6 → 428.6 ms（−11.0%），
+  DOM 8598 → 4888；long 265.9 → 237.0 ms（−10.9%），DOM 4114 → 2869。long 首行后
+  会多出约 39 ms 的第二个 Long Task（settled 142.5 → 181.5 ms），总 Long Task 时间
+  可能反而增加；详见 `docs/research/stage4-revisit.md`。
+
+#### 渐进补挂（progressive，本轮 NO-GO）
+
+首帧只给隐藏 tool-call 放占位，双 `requestAnimationFrame` 确认绘制后，用
+`requestIdleCallback`（无则 `setTimeout 0`）按每片最多 4 个节点 / 约 5 ms 补回原生
+`renderSlot`；Ctrl+F 捕获阶段先用 `flushSync` 全量补回，`beforematch` 兜底。
+
+- 开关：`localStorage['dsh-fastload.lazy-progressive'] = '1'`（或
+  `window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__ = true`），**默认关闭**；同时开启永久
+  模式时渐进模式优先。
+- 首开收益与永久模式同量级，最终 DOM/文本/滚动与原生一致；normal 补挂约 0.8–0.9 s、
+  long 约 0.13–0.19 s，首开补挂分片未见 >50 ms 长任务。
+- 但 turn rail 跳转到未加载历史时，渐进模式总补挂 12.9 s、产生 93 个 69–110 ms
+  Long Task；同一场景 stock 只有 1 个 781 ms 任务。按“后台长任务明显变差”判
+  **NO-GO**，不作为可发布方案，仅保留代码与数据供复现。
+- 实现依赖私有接口：读取 `ctx.slots.entries('conversation.chat.flow')` 的 entry 并
+  临时替换 `entry.component`。安装前做能力检测，任何未知形状都不安装；卸载时
+  仅当 `entry.component` 仍是本插件的 wrapper 才还原。该接口不在 DSH 公共 API
+  承诺内，升级后可能失效，因此两个实验都默认关闭，也不建议作为默认行为发布。
+
+### 卸载、禁用与回退
+
+- 在 profile 中禁用或移除 `dsh-fastload` 后，插件的 disposer 会还原被包装的
+  `sessionController.follow`、删除 `__dshFastload` 标记、停止空闲刷新计时器/监听/在飞构建、
+  取消尚未执行的延后构建，并 flush 页缓存；DSH 回到 stock 行为。
+- 页缓存与 `serve.log` 留在 `$DSH_HOME/cache/dsh-fastload`（或 `DSH_FASTLOAD_CACHE_DIR`）；
+  它们不会被 stock 读取，可随时手动删除。插件从不修改会话日志、会话选择或正式 Session Store。
+- 空闲刷新、启动预热、诊断、折叠组懒挂载、渐进补挂默认关闭；延后构建默认开启，但不会延后带 `activate=true` 的真实点击。环境变量非法时回退默认值。
+  卸载或关闭开关不需要迁移数据。
+- 私有接口与未知 DSH 版本的降级路径见 `AGENTS.md`「私有接口与能力检测」；完整集成/回归
+  证据见 `docs/research/plugin-optimization-final-report.md`。
 
 ### 安装
 
@@ -114,7 +215,8 @@ patch（或用 `--patch` 传入）中加入：
 npm test
 ```
 
-测试覆盖首屏判定、两 turn 下限、turn 边界裁切和硬上限回退。默认参数的
+测试覆盖首屏判定、两 turn 下限、turn 边界裁切、硬上限回退，以及客户端契约
+（被动预加载、启动预热的开关/取消/只读）。默认参数的
 真实浏览器数据见 `docs/research/dsh-cdp-benchmark-results.md`。
 
 ## 实测依据

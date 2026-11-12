@@ -17,12 +17,13 @@
  * scrolls, the newest content is already at the bottom and adding older rows
  * would only cost work without changing what the user sees.
  *
- * Diagnostics: the module keeps a small ring buffer of uncaught errors,
- * unhandled rejections and console.error calls, so a transcript that renders
- * empty can be explained afterwards. `window.__DSH_FASTLOAD__.probe()` returns
- * the whole picture (flow geometry, slot-error boundaries, scroll box, buffered
- * errors) and copies it to the clipboard; the buffer is also printed once when
- * an empty transcript with "Load older" is detected.
+ * Diagnostics are opt-in (stage 6): fiber walks, assembler/builder snapshots,
+ * flush logs, the console wrapper and the per-scan sampler only run when
+ * localStorage 'dsh-fastload.diagnostics' = '1' or
+ * window.__DSH_FASTLOAD_DIAGNOSTICS__ = true. With the switch off the module
+ * still fills a short first page, still heals a blank transcript and still
+ * prewarms, but it keeps no forensic buffers and registers no diagnostic
+ * timers. `window.__DSH_FASTLOAD__.probe()` exists only on that opt-in path.
  */
 
 (() => {
@@ -44,7 +45,7 @@
   // Every served module instance stamps its build id into the probe payload:
   // two instances of this client can coexist while a page is being rebuilt,
   // and a stale one would answer the probe with old logic.
-  const BUILD = 'v19';
+  const BUILD = 'v20';
 // Instrumentation patches hot paths (assembler flush, chat builder replace),
 // so it stays off unless explicitly asked for: localStorage
 // 'dsh-fastload.debug' = '1', or window.__DSH_FASTLOAD_DEBUG__ = true.
@@ -55,6 +56,23 @@ const DEBUG = (() => {
     return false;
   }
 })();
+// Stage 6: the forensic layer is opt-in, so the default client stays a pager
+// plus a bounded recovery path. Everything under "diagnostics" below (fiber
+// probes, deep assembler/builder snapshots, flush/build logs, the console
+// wrapper, the per-scan sampler, window.__DSH_FASTLOAD__) is registered or
+// materialised only when this switch is on. Same dual shape as every other
+// switch in this file: localStorage first, then a window flag for tests.
+const DIAG_KEY = 'dsh-fastload.diagnostics';
+const DIAG = (() => {
+  try {
+    return localStorage.getItem(DIAG_KEY) === '1' || window.__DSH_FASTLOAD_DIAGNOSTICS__ === true;
+  } catch {
+    return false;
+  }
+})();
+// Patching shared prototypes is more invasive than reading them, so the older
+// debug switch keeps its own meaning: instrumentation = DEBUG on top of DIAG.
+const INSTRUMENT = DIAG && DEBUG;
   // A blank transcript can repair itself (the window may be installed a moment
   // after the first frame), so the probe keeps a rolling timeline of what the
   // flow was handed: a sample taken after recovery still shows whether rows
@@ -85,12 +103,510 @@ const DEBUG = (() => {
   const PREWARM_DELAY_MS = 150;
   const PREWARM_TTL_MS = 10 * 60 * 1000;
   const PREWARM_MAX_QUEUE = 4;
+  // Stage 2: the persisted selection names the session this page will restore,
+  // so its opening page can be built while the workspace/session lists are
+  // still loading. This is opt-in (unlike the hover hint above) because it
+  // costs one extra initial-page read on every page load. Values: '1' or true.
+  const RESTORE_PREWARM_KEY = 'dsh-fastload.restore-prewarm';
+  // Remember one successful warm per tab. A reload does not change the
+  // persistence revision, so the disk page cache from the first warm is still
+  // the one the native restore will use; warming again only adds Host work.
+  const RESTORE_WARM_GUARD_KEY = 'dsh-fastload.restore-prewarm.at';
+  const RESTORE_WARM_GUARD_MS = 60 * 1000;
+  // uiWorkspace may activate shortly after this plugin. Wait for it briefly,
+  // but never warm without its selection signal: a warm racing the native
+  // restore would open the same page twice, and skipping is the safer fallback.
+  const RESTORE_SIGNAL_RETRY_MS = 200;
+  const RESTORE_SIGNAL_RETRIES = 10;
+  const RESTORE_START_DELAY_MS = 0;
+
+  // === stage 4 experimental lazy groups (default off) ===
+  //
+  // Long sessions spend most of their first React commit on folded process
+  // groups. The native flow renders every ChatNodeSeat even when the group is
+  // inside hidden="until-found"; only the paint is skipped. This experiment
+  // swaps the flow entry's component for a wrapper that replaces the node
+  // view of folded tool calls with a plain-text placeholder, while leaving the
+  // group shell (header, disclosure, stats, anchors) untouched.
+  //
+  // It is deliberately conservative: only tool-call nodes that the native
+  // presentation already marks as folded members are replaced. Everything
+  // else delegates to the original renderSlot, so ownership checks, context
+  // and slot assembly stay on the native path. If any private shape is
+  // missing, the installer does nothing and the stock component renders.
+  const LAZY_GROUPS_KEY = 'dsh-fastload.lazy-groups';
+  const LAZY_PROGRESSIVE_KEY = 'dsh-fastload.lazy-progressive';
+  const LAZY_GROUPS_SLOT = 'conversation.chat.flow';
+  const LAZY_GROUP_TEXT_MAX = 4000;
+  const LAZY_PROGRESSIVE_CHUNK_NODES = 4;
+  const LAZY_PROGRESSIVE_CHUNK_MS = 5;
+  function lazyGroupsEnabled() {
+    try {
+      if (localStorage.getItem(LAZY_GROUPS_KEY) === '1') return true;
+    } catch {}
+    return window.__DSH_FASTLOAD_LAZY_GROUPS__ === true;
+  }
+  function lazyProgressiveEnabled() {
+    try {
+      if (localStorage.getItem(LAZY_PROGRESSIVE_KEY) === '1') return true;
+    } catch {}
+    return window.__DSH_FASTLOAD_LAZY_PROGRESSIVE__ === true;
+  }
+  function lazyAnyEnabled() { return lazyProgressiveEnabled() || lazyGroupsEnabled(); }
+  function lazyGroupText(value) {
+    const out = [];
+    let budget = LAZY_GROUP_TEXT_MAX;
+    const walk = (item, depth) => {
+      if (budget <= 0 || depth > 6 || item == null) return;
+      if (typeof item === 'string') {
+        const text = item.length > budget ? item.slice(0, budget) : item;
+        out.push(text);
+        budget -= text.length;
+        return;
+      }
+      if (typeof item === 'number' || typeof item === 'boolean') {
+        const text = String(item);
+        out.push(text);
+        budget -= text.length;
+        return;
+      }
+      if (Array.isArray(item)) {
+        for (const child of item) {
+          walk(child, depth + 1);
+          if (budget <= 0) break;
+        }
+        return;
+      }
+      if (typeof item === 'object') {
+        for (const key of Object.keys(item)) {
+          if (key === 'raw' || key === 'json') continue;
+          walk(item[key], depth + 1);
+          if (budget <= 0) break;
+        }
+      }
+    };
+    try { walk(value, 0); } catch {}
+    return out.join(' ');
+  }
+  function lazyGroupEligible(owner) {
+    const process = owner && owner.turnProcess;
+    const node = owner && owner.node;
+    if (!process || process.foldable !== true || process.open === true) return false;
+    if (!node || node.kind !== 'tool-call') return false;
+    const spec = process.spec;
+    if (!spec) return false;
+    if (typeof node.anchorSeq !== 'number' || node.anchorSeq < spec.processStartSeq) return false;
+    if (spec.answerAnchorSeq !== null && spec.answerAnchorSeq !== undefined && node.anchorSeq >= spec.answerAnchorSeq) return false;
+    return true;
+  }
+  function installLazyGroups(ctx, requireFn, state) {
+    const report = {
+      enabled: false, wrapped: false, wrapperCalls: 0, slotCalls: 0,
+      lazyNodes: 0, nativeNodes: 0, errors: [], reason: null, settings: null,
+      mode: null, progressive: null,
+    };
+    const readChatSettings = () => {
+      try {
+        const forms = ctx && (ctx.configForms || (typeof ctx.get === 'function' ? ctx.get('configForms') : null));
+        const form = forms && typeof forms.get === 'function' ? forms.get('ui-chat') : null;
+        const snapshot = form && typeof form.getSnapshot === 'function' ? form.getSnapshot() : null;
+        const value = snapshot && snapshot.value;
+        if (!value) return null;
+        return {
+          transcriptView: value.transcriptView === undefined ? null : value.transcriptView,
+          collapseTiming: value.collapseTiming === undefined ? null : value.collapseTiming,
+          foldedReplies: value.foldedReplies === undefined ? null : value.foldedReplies,
+        };
+      } catch { return null; }
+    };
+    report.settings = readChatSettings();
+    try { state.lazyGroups = report; } catch {}
+    if (!lazyAnyEnabled()) {
+      report.reason = 'switch-off';
+      return () => {};
+    }
+    report.enabled = true;
+    report.mode = lazyProgressiveEnabled() ? 'progressive' : 'permanent';
+    let React = null;
+    try { React = requireFn('react'); } catch (error) { report.errors.push('react: ' + String(error && error.message || error)); }
+    if (!React || typeof React.createElement !== 'function') {
+      report.reason = 'react-unavailable';
+      return () => {};
+    }
+    let ReactDom = null;
+    try { ReactDom = requireFn('react-dom'); } catch (error) { report.errors.push('react-dom: ' + String(error && error.message || error)); }
+    const flushSync = ReactDom && typeof ReactDom.flushSync === 'function' ? ReactDom.flushSync : null;
+    if (report.mode === 'progressive' && flushSync === null) {
+      // Without a synchronous render, Ctrl+F could run before retired nodes hit
+      // the DOM. Fail closed to stock rendering instead of risking a stale find.
+      report.reason = 'flush-sync-unavailable';
+      report.enabled = false;
+      return () => {};
+    }
+    let slots = null;
+    try { slots = ctx.get && ctx.get('slots'); } catch {}
+    if (!slots) { try { slots = ctx.slots; } catch {} }
+    if (!slots || typeof slots.entries !== 'function') {
+      report.reason = 'slots-unavailable';
+      return () => {};
+    }
+    let entry = null;
+    let original = null;
+    let Wrapper = null;
+    let offSlots = null;
+    let retryTimer = null;
+    // Mounted wrappers register a synchronous stop function here. Restoring
+    // entry.component does not unmount the already-rendered tree, so the
+    // disposer must stop their drain, listeners and optimizations itself.
+    const mountedWrappers = new Set();
+    const find = () => {
+      try {
+        const list = slots.entries(LAZY_GROUPS_SLOT);
+        return list && list.length > 0 ? list[0] : null;
+      } catch (error) {
+        report.errors.push('entries: ' + String(error && error.message || error));
+        return null;
+      }
+    };
+    const wrap = () => {
+      if (Wrapper !== null) return;
+      const found = find();
+      if (!found || found.__dshFastloadLazyGroups === true) return;
+      report.settings = readChatSettings();
+      const component = found.component;
+      if (component === null || (typeof component !== 'function' && typeof component !== 'object')) return;
+      original = component;
+      Wrapper = function FastloadLazyFlow(props) {
+        report.wrapperCalls += 1;
+        if (report.settings === null) report.settings = readChatSettings();
+        const progressive = report.mode === 'progressive';
+        const latest = React.useRef(props);
+        latest.current = props;
+        const pendingRef = React.useRef(null);
+        if (pendingRef.current === null) pendingRef.current = new Map();
+        const retiredRef = React.useRef(null);
+        if (retiredRef.current === null) retiredRef.current = new Set();
+        const [epoch, setEpoch] = React.useState(0);
+        const [disabled, setDisabled] = React.useState(false);
+        const disabledRef = React.useRef(false);
+        const stopDrainRef = React.useRef(null);
+        const stopListenersRef = React.useRef(null);
+        const drainRef = React.useRef(null);
+        if (drainRef.current === null) {
+          drainRef.current = {
+            started: false, done: false, idle: null, idleKind: null,
+            raf1: 0, raf2: 0, chunks: 0, nodes: 0, maxChunkMs: 0,
+            startedAt: null, doneAt: null, cancelled: false,
+          };
+        }
+        // Keep drain state per mounted flow. Session switches can mount a new
+        // flow before the old cleanup runs; a shared report object would let
+        // the old cleanup mark the new mount cancelled.
+        const mountRef = React.useRef(null);
+        if (mountRef.current === null) {
+          mountRef.current = {
+            mountId: (report.mountSeq || 0) + 1,
+            firstFrameAt: null, firstFramePending: 0, startedAt: null, doneAt: null,
+            chunks: 0, nodes: 0, maxChunkMs: 0, flushSync: flushSync !== null,
+            cancelled: false, revealReason: null, pending: 0, done: false,
+          };
+          report.mountSeq = mountRef.current.mountId;
+          if (progressive) report.progressive = mountRef.current;
+        }
+        const prog = mountRef.current;
+        const cancelIdle = () => {
+          const d = drainRef.current;
+          if (d.idle === null) return;
+          try {
+            if (d.idleKind === 'idle' && typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(d.idle);
+            else clearTimeout(d.idle);
+          } catch {}
+          d.idle = null; d.idleKind = null;
+        };
+        const scheduleIdle = (fn) => {
+          const d = drainRef.current;
+          if (!progressive || d.done || d.cancelled) return;
+          cancelIdle();
+          try {
+            if (typeof window.requestIdleCallback === 'function') {
+              d.idleKind = 'idle';
+              d.idle = window.requestIdleCallback(() => { d.idle = null; d.idleKind = null; fn(); }, { timeout: 300 });
+            } else {
+              d.idleKind = 'timeout';
+              d.idle = setTimeout(() => { d.idle = null; d.idleKind = null; fn(); }, 0);
+            }
+          } catch { d.idle = null; d.idleKind = null; }
+        };
+        const drainChunk = () => {
+          const d = drainRef.current;
+          if (!progressive || d.done || d.cancelled) return;
+          if (d.startedAt === null) d.startedAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+          if (prog && prog.startedAt === null) prog.startedAt = d.startedAt;
+          const pending = pendingRef.current;
+          const keys = [];
+          const start = typeof performance !== 'undefined' ? performance.now() : Date.now();
+          const iterator = pending.keys();
+          while (keys.length < LAZY_PROGRESSIVE_CHUNK_NODES && pending.size > 0) {
+            const next = iterator.next();
+            if (next.done) break;
+            keys.push(next.value);
+            if ((typeof performance !== 'undefined' ? performance.now() : Date.now()) - start >= LAZY_PROGRESSIVE_CHUNK_MS) break;
+          }
+          if (prog) prog.pending = pending.size;
+          if (keys.length === 0) {
+            d.done = true; d.doneAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            if (prog) { prog.done = true; prog.doneAt = d.doneAt; prog.pending = 0; }
+            return;
+          }
+          const apply = () => {
+            for (const key of keys) { pending.delete(key); retiredRef.current.add(key); }
+            setEpoch((value) => value + 1);
+          };
+          const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now();
+          if (flushSync !== null) {
+            try { flushSync(apply); } catch { apply(); }
+          } else {
+            apply();
+          }
+          const dt = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - t0;
+          d.chunks += 1; d.nodes += keys.length;
+          if (dt > d.maxChunkMs) d.maxChunkMs = dt;
+          if (prog) {
+            prog.chunks = d.chunks; prog.nodes = d.nodes; prog.maxChunkMs = d.maxChunkMs;
+            prog.pending = pending.size;
+          }
+          if (pending.size > 0 && !d.done && !d.cancelled) scheduleIdle(drainChunk);
+          else {
+            d.done = true; d.doneAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            if (prog) { prog.done = true; prog.doneAt = d.doneAt; prog.pending = 0; }
+          }
+        };
+        const fillAllSync = (reason) => {
+          if (!progressive) return false;
+          const pending = pendingRef.current;
+          if (pending.size === 0) return false;
+          const d = drainRef.current;
+          // Cancel the background drain but leave the wrapper mounted: a later
+          // snapshot may add new placeholders, which must still hydrate.
+          cancelIdle();
+          if (d.raf1) { try { cancelAnimationFrame(d.raf1); } catch {} d.raf1 = 0; }
+          if (d.raf2) { try { cancelAnimationFrame(d.raf2); } catch {} d.raf2 = 0; }
+          const keys = [];
+          for (const key of pending.keys()) keys.push(key);
+          if (keys.length === 0) { pending.clear(); return false; }
+          const apply = () => {
+            for (const key of keys) { pending.delete(key); retiredRef.current.add(key); }
+            setEpoch((value) => value + 1);
+          };
+          if (flushSync !== null) {
+            try { flushSync(apply); } catch { apply(); }
+          } else {
+            apply();
+          }
+          d.done = true; d.started = false;
+          d.doneAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+          if (prog) {
+            prog.done = true; prog.doneAt = d.doneAt; prog.revealReason = reason;
+            prog.pending = pending.size;
+          }
+          return true;
+        };
+        const dropPending = (key) => {
+          const pending = pendingRef.current;
+          if (!pending.has(key)) return;
+          pending.delete(key);
+          retiredRef.current.add(key);
+          if (prog) prog.pending = pending.size;
+          if (pending.size === 0 && prog && !prog.done) {
+            const d = drainRef.current;
+            cancelIdle();
+            d.done = true; d.started = false;
+            d.doneAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            prog.done = true; prog.doneAt = d.doneAt;
+            prog.revealReason = prog.revealReason || 'expanded';
+          }
+        };
+        const custom = React.useMemo(() => function fastloadRenderSlot(key, owner, opts) {
+          report.slotCalls += 1;
+          if (disabledRef.current || disabled || key !== 'conversation.chat.node') {
+            return latest.current.renderSlot(key, owner, opts);
+          }
+          const node = owner && owner.node;
+          try {
+            const eligible = lazyGroupEligible(owner);
+            if (progressive && node && node.kind === 'tool-call') {
+              if (retiredRef.current.has(node.key)) {
+                pendingRef.current.delete(node.key);
+                report.nativeNodes += 1;
+                return latest.current.renderSlot(key, owner, opts);
+              }
+              if (eligible) {
+                pendingRef.current.set(node.key, { owner, opts });
+                if (prog) prog.pending = pendingRef.current.size;
+                report.lazyNodes += 1;
+                return React.createElement('div', {
+                  'data-fastload-lazy-group': '',
+                  'data-fastload-lazy-key': node.key,
+                  style: { minHeight: '18px' },
+                });
+              }
+              if (pendingRef.current.has(node.key)) {
+                dropPending(node.key);
+              }
+            } else if (!progressive && eligible) {
+              report.lazyNodes += 1;
+              return React.createElement('div', {
+                'data-fastload-lazy-group': '',
+                'data-fastload-lazy-key': node.key,
+                style: { minHeight: '18px', whiteSpace: 'pre-wrap' },
+              }, lazyGroupText(node && node.data));
+            }
+          } catch (error) {
+            report.errors.push('lazy: ' + String(error && error.message || error));
+            while (report.errors.length > 8) report.errors.shift();
+          }
+          report.nativeNodes += 1;
+          return latest.current.renderSlot(key, owner, opts);
+        }, [progressive, epoch, disabled]);
+        React.useEffect(() => {
+          const stop = () => {
+            disabledRef.current = true;
+            setDisabled(true);
+            try { if (stopDrainRef.current) stopDrainRef.current(); } catch {}
+            try { if (stopListenersRef.current) stopListenersRef.current(); } catch {}
+          };
+          mountedWrappers.add(stop);
+          return () => { mountedWrappers.delete(stop); };
+        }, []);
+        React.useEffect(() => {
+          if (!progressive || disabled) return;
+          const d = drainRef.current;
+          if (d.cancelled) return;
+          // A late snapshot can add placeholders after the first wrapper render.
+          // Restart the drain once it has finished so those nodes still hydrate.
+          if (d.done && pendingRef.current.size > 0) {
+            d.done = false; d.started = false; d.chunks = 0; d.nodes = 0; d.maxChunkMs = 0;
+            if (prog) { prog.done = false; prog.doneAt = null; prog.chunks = 0; prog.nodes = 0; }
+          }
+          if (d.started || d.done || pendingRef.current.size === 0) return;
+          d.started = true;
+          if (prog) {
+            prog.firstFrameAt = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+            prog.firstFramePending = pendingRef.current.size;
+          }
+          d.raf1 = requestAnimationFrame(() => {
+            d.raf2 = requestAnimationFrame(() => { d.raf2 = 0; scheduleIdle(drainChunk); });
+          });
+        });
+        React.useEffect(() => {
+          if (!progressive || disabled) return undefined;
+          const d = drainRef.current;
+          const cleanup = () => {
+            d.cancelled = true;
+            cancelIdle();
+            if (d.raf1) { try { cancelAnimationFrame(d.raf1); } catch {} d.raf1 = 0; }
+            if (d.raf2) { try { cancelAnimationFrame(d.raf2); } catch {} d.raf2 = 0; }
+            if (prog) prog.cancelled = true;
+          };
+          stopDrainRef.current = cleanup;
+          return () => {
+            if (stopDrainRef.current === cleanup) stopDrainRef.current = null;
+            cleanup();
+          };
+        }, [progressive, disabled]);
+        React.useEffect(() => {
+          if (!progressive || disabled) return undefined;
+          const onKeyDown = (event) => {
+            if ((event.ctrlKey || event.metaKey) && (event.key === 'f' || event.key === 'F')) fillAllSync('keydown');
+          };
+          const onBeforeMatch = () => { fillAllSync('beforematch'); };
+          document.addEventListener('keydown', onKeyDown, true);
+          document.addEventListener('beforematch', onBeforeMatch, true);
+          const cleanup = () => {
+            document.removeEventListener('keydown', onKeyDown, true);
+            document.removeEventListener('beforematch', onBeforeMatch, true);
+          };
+          stopListenersRef.current = cleanup;
+          return () => {
+            if (stopListenersRef.current === cleanup) stopListenersRef.current = null;
+            cleanup();
+          };
+        }, [progressive, disabled]);
+        return React.createElement(original, Object.assign({}, props, { renderSlot: custom }));
+      };
+      try {
+        found.component = Wrapper;
+        found.__dshFastloadLazyGroups = true;
+        entry = found;
+        report.wrapped = true;
+        report.reason = null;
+      } catch (error) {
+        report.errors.push('assign: ' + String(error && error.message || error));
+        Wrapper = null;
+        original = null;
+        return;
+      }
+      if (retryTimer !== null) {
+        clearInterval(retryTimer);
+        retryTimer = null;
+      }
+    };
+    try {
+      if (typeof ctx.on === 'function') {
+        offSlots = ctx.on('slots/changed', (key) => { if (key === LAZY_GROUPS_SLOT) wrap(); });
+      } else if (typeof slots.subscribe === 'function') {
+        offSlots = slots.subscribe(LAZY_GROUPS_SLOT, () => wrap());
+      }
+    } catch (error) {
+      report.errors.push('listen: ' + String(error && error.message || error));
+    }
+    wrap();
+    if (Wrapper === null) {
+      // The chat plugin may register after this module. Keep retrying briefly;
+      // an entry registered later still gets the wrapper before its first open
+      // in the common case. If it is already open, only the next mount helps.
+      let attempts = 0;
+      retryTimer = setInterval(() => {
+        attempts += 1;
+        wrap();
+        if (Wrapper !== null || attempts >= 40) {
+          clearInterval(retryTimer);
+          retryTimer = null;
+        }
+      }, 250);
+    }
+    return () => {
+      if (retryTimer !== null) {
+        clearInterval(retryTimer);
+        retryTimer = null;
+      }
+      if (typeof offSlots === 'function') {
+        try { offSlots(); } catch {}
+        offSlots = null;
+      }
+      for (const stop of [...mountedWrappers]) {
+        try { stop(); } catch {}
+      }
+      mountedWrappers.clear();
+      if (entry !== null && Wrapper !== null) {
+        try {
+          if (entry.component === Wrapper) entry.component = original;
+          delete entry.__dshFastloadLazyGroups;
+        } catch (error) {
+          report.errors.push('restore: ' + String(error && error.message || error));
+        }
+      }
+      entry = null;
+    };
+  }
+  // === end stage 4 lazy groups ===
+
 
   if (typeof window === 'undefined' || !window.__ModuleLoader__) return;
 
   window.__ModuleLoader__.load({
     id: MODULE_ID,
-    factory() {
+    factory(require) {
       return {
         inject: ['remote', 'remote.session'],
         apply(ctx) {
@@ -131,6 +647,7 @@ const DEBUG = (() => {
           window.__DSH_FASTLOAD_CLIENT__ = state;
 
           ctx.effect(() => {
+            const disposeLazyGroups = installLazyGroups(ctx, require, state);
             const seen = new WeakSet();
             const blankHandled = new WeakSet();
             const blankFirstSeen = new WeakMap();
@@ -167,11 +684,104 @@ const DEBUG = (() => {
             let prewarmPending = null;
             let disposed = false;
 
+            // Stage 2 state. stage is one of disabled, waiting, queued,
+            // running, shared, done, skipped, cancelled or failed; "shared"
+            // means a hover warm for the same session already covers this
+            // target. Nothing here is ever copied into a Session store.
+            const restorePrewarm = {
+              enabled: null,
+              stage: 'waiting',
+              sid: null,
+              reason: null,
+              at: null,
+              ms: null,
+            };
+            state.restorePrewarm = restorePrewarm;
+            let restoreWatch = null;
+            let restoreSignalTimer = null;
+            let restoreSignalAttempts = 0;
+
             const prewarmAllowed = () => {
               try {
                 if (localStorage.getItem(PREWARM_KEY) === '0') return false;
               } catch {}
               return window.__DSH_FASTLOAD_PREWARM__ !== false;
+            };
+            // Stage 2: unlike the hover hint, the restore hint is off unless
+            // explicitly enabled. The two switches deliberately have opposite
+            // polarities, so a missing key can never turn this one on.
+            const restorePrewarmAllowed = () => {
+              try {
+                if (localStorage.getItem(RESTORE_PREWARM_KEY) === '1') return true;
+              } catch {}
+              return window.__DSH_FASTLOAD_RESTORE_PREWARM__ === true;
+            };
+            const uiWorkspaceOf = () => {
+              try {
+                return ctx && typeof ctx.get === 'function' ? ctx.get('uiWorkspace') : undefined;
+              } catch {
+                return undefined;
+              }
+            };
+            // The live main reference, not dsh.sessions.current: the persisted
+            // selection already equals the restore target before anything opens.
+            const mainSessionId = () => {
+              try {
+                const service = uiWorkspaceOf();
+                const reference = service && service.mainReference;
+                return reference && typeof reference.sessionId === 'string' ? reference.sessionId : null;
+              } catch {
+                return null;
+              }
+            };
+            // The selection signal alone cannot cancel the restore wait: the
+            // native restore is only observable through the live main
+            // reference, so a workspace without a readable
+            // mainReference.sessionId would leave mainSessionId() null forever
+            // and the prewarm would race the real open instead of yielding to
+            // it. Treat a missing, non-object or throwing reference as
+            // unavailable.
+            const hasMainReference = (service) => {
+              try {
+                const reference = service && service.mainReference;
+                return reference !== null
+                  && typeof reference === 'object'
+                  && typeof reference.sessionId === 'string';
+              } catch {
+                return false;
+              }
+            };
+            const stopRestoreWatch = () => {
+              if (restoreWatch !== null) {
+                try {
+                  restoreWatch();
+                } catch {}
+                restoreWatch = null;
+              }
+              if (restoreSignalTimer !== null) {
+                clearTimeout(restoreSignalTimer);
+                timers.delete(restoreSignalTimer);
+                restoreSignalTimer = null;
+              }
+            };
+            const finishRestorePrewarm = (stage, reason) => {
+              if (restorePrewarm.stage === 'done' || restorePrewarm.stage === 'cancelled') return;
+              restorePrewarm.stage = stage;
+              restorePrewarm.reason = reason === undefined ? null : reason;
+              restorePrewarm.at = Date.now();
+              stopRestoreWatch();
+            };
+            const cancelQueuedPrewarm = (sid, source) => {
+              let removed = false;
+              for (let index = prewarmQueue.length - 1; index >= 0; index -= 1) {
+                const entry = prewarmQueue[index];
+                if (entry.sid === sid && entry.source === source) {
+                  prewarmQueue.splice(index, 1);
+                  removed = true;
+                }
+              }
+              if (removed) prewarm.queued = prewarmQueue.length;
+              return removed;
             };
             const rowSessionId = (node) => {
               if (!node || typeof node.closest !== 'function') return null;
@@ -193,22 +803,39 @@ const DEBUG = (() => {
             const drainPrewarm = () => {
               if (disposed || prewarmActive !== null) return;
               while (prewarmQueue.length > 0) {
-                const sid = prewarmQueue.shift();
-                if (sid === currentSessionId()) continue;
-                void runPrewarm(sid);
+                const entry = prewarmQueue.shift();
+                prewarm.queued = prewarmQueue.length;
+                if (entry.source === 'restore') {
+                  // dsh.sessions.current already holds the restore target, so
+                  // currentSessionId() cannot distinguish "already open" from
+                  // "saved but not restored yet". Only the live main reference
+                  // proves the native view took the session over.
+                  if (mainSessionId() === entry.sid) {
+                    finishRestorePrewarm('skipped', 'already-open');
+                    continue;
+                  }
+                } else if (entry.sid === currentSessionId()) {
+                  continue;
+                }
+                void runPrewarm(entry.sid, entry.source);
                 return;
               }
             };
-            const runPrewarm = async (sid) => {
+            const runPrewarm = async (sid, source) => {
               const session = remoteSession();
               if (!session) {
                 prewarm.skipped += 1;
                 prewarm.error = 'remote.session.follow is unavailable';
+                if (source === 'restore') finishRestorePrewarm('skipped', 'remote-unavailable');
                 return;
               }
               const controller = new AbortController();
-              prewarmActive = { sid, controller };
+              prewarmActive = { sid, source, controller };
               const startedAt = Date.now();
+              if (source === 'restore') {
+                restorePrewarm.stage = 'running';
+                restorePrewarm.at = startedAt;
+              }
               try {
                 const stream = session.follow(
                   {
@@ -229,8 +856,17 @@ const DEBUG = (() => {
                   prewarm.sid = sid;
                   prewarm.ms = Date.now() - startedAt;
                   prewarm.ok = true;
+                  if (source === 'restore') {
+                    restorePrewarm.stage = 'done';
+                    restorePrewarm.reason = null;
+                    restorePrewarm.at = Date.now();
+                    restorePrewarm.ms = Date.now() - startedAt;
+                    markRestoreWarmed(sid);
+                    stopRestoreWatch();
+                  }
                 } else {
                   prewarm.skipped += 1;
+                  if (source === 'restore') finishRestorePrewarm('skipped', 'empty-page');
                 }
                 try {
                   await iterator.return?.();
@@ -239,26 +875,54 @@ const DEBUG = (() => {
                 prewarm.failed += 1;
                 prewarm.ok = false;
                 prewarm.error = String((error && error.message) || error).slice(0, 200);
+                if (source === 'restore') {
+                  if (controller.signal.aborted) {
+                    // A native open cancels the wait; keep that stage instead
+                    // of reporting the resulting abort as a fresh failure.
+                    if (restorePrewarm.stage !== 'cancelled') {
+                      restorePrewarm.stage = 'cancelled';
+                      restorePrewarm.reason = 'aborted';
+                      restorePrewarm.at = Date.now();
+                    }
+                  } else {
+                    finishRestorePrewarm('failed', prewarm.error);
+                  }
+                  stopRestoreWatch();
+                }
               } finally {
                 prewarmActive = null;
                 drainPrewarm();
               }
             };
-            const queuePrewarm = (sid) => {
+            const queuePrewarm = (sid, source) => {
+              const origin = source === 'restore' ? 'restore' : 'hover';
               const now = Date.now();
               const last = prewarmed.get(sid);
               if (last !== undefined && now - last < PREWARM_TTL_MS) {
                 prewarm.skipped += 1;
+                if (origin === 'restore') finishRestorePrewarm('skipped', 'warm-cache-fresh');
                 return;
               }
-              if (prewarmActive !== null && prewarmActive.sid === sid) return;
-              if (prewarmQueue.includes(sid)) return;
+              if (prewarmActive !== null && prewarmActive.sid === sid) {
+                if (origin === 'restore') finishRestorePrewarm('shared', 'already-running');
+                return;
+              }
+              const queued = prewarmQueue.find((entry) => entry.sid === sid);
+              if (queued !== undefined) {
+                if (origin === 'restore') finishRestorePrewarm('shared', 'already-queued');
+                return;
+              }
               if (prewarmQueue.length >= PREWARM_MAX_QUEUE) {
                 prewarm.skipped += 1;
+                if (origin === 'restore') finishRestorePrewarm('skipped', 'queue-full');
                 return;
               }
-              prewarmQueue.push(sid);
+              prewarmQueue.push({ sid, source: origin });
               prewarm.queued = prewarmQueue.length;
+              if (origin === 'restore') {
+                restorePrewarm.stage = 'queued';
+                restorePrewarm.reason = null;
+              }
               drainPrewarm();
             };
             const cancelPendingPrewarm = () => {
@@ -377,6 +1041,7 @@ const DEBUG = (() => {
             // ---- diagnostics -------------------------------------------------
             const buffer = [];
             const remember = (kind, value) => {
+              if (!DIAG) return;
               let text;
               try {
                 text = typeof value === 'string' ? value : value && value.stack ? value.stack : JSON.stringify(value);
@@ -395,17 +1060,19 @@ const DEBUG = (() => {
               const reason = event && event.reason;
               remember('rejection', (reason && (reason.stack || reason.message)) || reason || 'rejection');
             };
-            window.addEventListener('error', onError);
-            window.addEventListener('unhandledrejection', onRejection);
-
             const originalError = console.error;
-            const quietError = (...args) => {
-              try {
-                remember('console', args.map((arg) => (arg && arg.stack ? arg.stack : arg)).join(' '));
-              } catch {}
-              return originalError.apply(console, args);
-            };
-            console.error = quietError;
+            let quietError = null;
+            if (DIAG) {
+              window.addEventListener('error', onError);
+              window.addEventListener('unhandledrejection', onRejection);
+              quietError = (...args) => {
+                try {
+                  remember('console', args.map((arg) => (arg && arg.stack ? arg.stack : arg)).join(' '));
+                } catch {}
+                return originalError.apply(console, args);
+              };
+              console.error = quietError;
+            }
 
             const rectOf = (node) => {
               const rect = node.getBoundingClientRect();
@@ -558,6 +1225,7 @@ const DEBUG = (() => {
             // One line per scan: what the mounted flow was handed and what the
             // user could see, so a later probe can replay the first seconds.
             const flowSample = () => {
+              if (!DIAG) return;
               const flow = document.querySelector('[data-chat-flow]:not([data-step-process-content])');
               const slot = flow ? flowSlotOf(flow) : null;
               const scroll = flow ? scrollParentOf(flow) : null;
@@ -608,6 +1276,208 @@ const DEBUG = (() => {
                 return '';
               }
             };
+
+            // ---- Stage 2: warm the last selection ---------------------------
+            // Reads dsh.sessions.current only. DSH's own restoreSelection()
+            // remains the only code that opens a session; this half just asks
+            // the Host for the first page so that opening finds it cached.
+            const readRestoreTarget = () => {
+              let raw;
+              try {
+                raw = localStorage.getItem('dsh.sessions.current');
+              } catch {
+                return { reason: 'storage-unavailable' };
+              }
+              if (!raw) return { reason: 'empty' };
+              let parsed;
+              try {
+                parsed = JSON.parse(raw);
+              } catch {
+                return { reason: 'invalid-json' };
+              }
+              if (typeof parsed === 'string') {
+                return parsed === '' ? { reason: 'empty' } : { sid: parsed };
+              }
+              if (parsed === null || typeof parsed !== 'object') {
+                return { reason: 'invalid-shape' };
+              }
+              // Same rule as restoreSelection(): any defined subagentAddress
+              // takes the subagent branch, so this first version skips it.
+              if (parsed.subagentAddress !== undefined) return { reason: 'subagent' };
+              if (typeof parsed.sessionId !== 'string' || parsed.sessionId === '') {
+                return { reason: 'missing-session-id' };
+              }
+              return { sid: parsed.sessionId };
+            };
+            const recentlyRestoreWarmed = (sid) => {
+              let raw;
+              try {
+                raw = sessionStorage.getItem(RESTORE_WARM_GUARD_KEY) || '';
+              } catch {
+                return false;
+              }
+              const split = raw.lastIndexOf('@');
+              if (split < 0 || raw.slice(0, split) !== sid) return false;
+              const at = Number(raw.slice(split + 1));
+              return Number.isFinite(at) && at > 0 && Date.now() - at < RESTORE_WARM_GUARD_MS;
+            };
+            const markRestoreWarmed = (sid) => {
+              try {
+                sessionStorage.setItem(RESTORE_WARM_GUARD_KEY, sid + '@' + Date.now());
+              } catch {}
+            };
+            // Only answers when the session list is already ready. Waiting for
+            // it would defeat the startup overlap; when it is not ready the
+            // follow itself reports a deleted session as a silent failure.
+            const restoredTargetProblem = (service, sid) => {
+              try {
+                const list = service.sessions && service.sessions.list
+                  ? service.sessions.list.getSnapshot()
+                  : null;
+                if (!list || list.phase !== 'ready' || !list.byId) return null;
+                const summary = list.byId[sid];
+                if (summary === undefined) return 'session-missing';
+                if (summary.blank === true) return 'blank-session';
+              } catch {}
+              return null;
+            };
+            const cancelRestorePrewarm = (reason) => {
+              const stage = restorePrewarm.stage;
+              if (stage !== 'waiting' && stage !== 'queued' && stage !== 'running') return;
+              restorePrewarm.stage = 'cancelled';
+              restorePrewarm.reason = reason;
+              restorePrewarm.at = Date.now();
+              cancelQueuedPrewarm(restorePrewarm.sid, 'restore');
+              if (prewarmActive !== null
+                && prewarmActive.sid === restorePrewarm.sid
+                && prewarmActive.source === 'restore') {
+                // Only this plugin's own passive follow is aborted. A hover
+                // warm that happens to target the same session is left alone,
+                // and the native restore stream is never touched.
+                try {
+                  prewarmActive.controller.abort();
+                } catch {}
+              }
+              stopRestoreWatch();
+            };
+            const armRestoreWatch = (service, sid) => {
+              restoreWatch = service.selection.subscribe((snapshot) => {
+                if (disposed) return;
+                const selected = snapshot && typeof snapshot === 'object' ? snapshot.sessionId : undefined;
+                if (typeof selected !== 'string' || selected === '') return;
+                if (selected !== sid) {
+                  // The native restore picked another session (or the user
+                  // did); the saved target is no longer what this page opens.
+                  cancelRestorePrewarm('selection-changed');
+                  return;
+                }
+                // replaceMain() writes the selection just before it installs
+                // mainReference, so decide one microtask later: the initial
+                // rehydrated value must not be mistaken for a fresh open.
+                queueMicrotask(() => {
+                  if (disposed) return;
+                  if (mainSessionId() === sid) cancelRestorePrewarm('opened');
+                });
+              });
+            };
+            const armRestoreSignal = () => {
+              restoreSignalTimer = null;
+              if (disposed || restorePrewarm.stage !== 'waiting') return;
+              const service = uiWorkspaceOf();
+              if (service !== undefined
+                && service.selection
+                && typeof service.selection.subscribe === 'function'
+                && typeof service.selection.getSnapshot === 'function') {
+                if (!hasMainReference(service)) {
+                  // Without the live main reference the restore can never
+                  // cancel this stage, so a follow here would build the same
+                  // page a second time next to the real open.
+                  finishRestorePrewarm('skipped', 'main-reference-unavailable');
+                  return;
+                }
+                if (mainSessionId() === restorePrewarm.sid) {
+                  finishRestorePrewarm('skipped', 'already-open');
+                  return;
+                }
+                const problem = restoredTargetProblem(service, restorePrewarm.sid);
+                if (problem !== null) {
+                  finishRestorePrewarm('skipped', problem);
+                  return;
+                }
+                // Subscribe before starting any network work: a rejected
+                // subscribe throws out of here and the caller marks the
+                // prewarm failed without a follow in flight. The callback may
+                // also run synchronously (already-open / selection-changed),
+                // so the stage is checked again afterwards.
+                armRestoreWatch(service, restorePrewarm.sid);
+                if (disposed || restorePrewarm.stage !== 'waiting') {
+                  stopRestoreWatch();
+                  return;
+                }
+                queuePrewarm(restorePrewarm.sid, 'restore');
+                return;
+              }
+              restoreSignalAttempts += 1;
+              if (restoreSignalAttempts > RESTORE_SIGNAL_RETRIES) {
+                finishRestorePrewarm('skipped', 'cancel-signal-unavailable');
+                return;
+              }
+              const target = readRestoreTarget();
+              if (target.sid !== restorePrewarm.sid) {
+                finishRestorePrewarm('skipped', 'selection-changed');
+                return;
+              }
+              restoreSignalTimer = setTimeout(() => {
+                timers.delete(restoreSignalTimer);
+                restoreSignalTimer = null;
+                try {
+                  armRestoreSignal();
+                } catch (error) {
+                  finishRestorePrewarm('failed', String((error && error.message) || error).slice(0, 200));
+                }
+              }, RESTORE_SIGNAL_RETRY_MS);
+              timers.add(restoreSignalTimer);
+            };
+            const startRestorePrewarm = () => {
+              restorePrewarm.enabled = restorePrewarmAllowed();
+              if (!restorePrewarm.enabled) {
+                finishRestorePrewarm('disabled', 'disabled');
+                return;
+              }
+              if (disposed || document.hidden) {
+                finishRestorePrewarm('skipped', 'hidden');
+                return;
+              }
+              const target = readRestoreTarget();
+              if (typeof target.sid !== 'string') {
+                finishRestorePrewarm('skipped', target.reason);
+                return;
+              }
+              restorePrewarm.sid = target.sid;
+              restorePrewarm.stage = 'waiting';
+              if (recentlyRestoreWarmed(target.sid)) {
+                // A reload did not change the persistence revision, so the
+                // page cache from the previous warm is still current.
+                finishRestorePrewarm('skipped', 'recently-warmed');
+                return;
+              }
+              if (currentSessionId() !== target.sid) {
+                finishRestorePrewarm('skipped', 'selection-changed');
+                return;
+              }
+              armRestoreSignal();
+            };
+            {
+              const startTimer = setTimeout(() => {
+                timers.delete(startTimer);
+                try {
+                  startRestorePrewarm();
+                } catch (error) {
+                  finishRestorePrewarm('failed', String((error && error.message) || error).slice(0, 200));
+                }
+              }, RESTORE_START_DELAY_MS);
+              timers.add(startTimer);
+            }
 
             const autofixAllowed = () => {
               try {
@@ -787,7 +1657,7 @@ const DEBUG = (() => {
               } catch {}
               state.healed += 1;
               state.blank = payload;
-              const before = conversationProbe(true);
+              const before = conversationProbe(DIAG);
               // A window that carries an executed rewind is not broken: walk
               // back instead of re-publishing the same all-hidden order.
               if (windowRewound()) {
@@ -810,7 +1680,7 @@ const DEBUG = (() => {
                   blankHandled.delete(flow);
                   return;
                 }
-                const after = conversationProbe(true);
+                const after = conversationProbe(DIAG);
                 state.heal = { action: 'rebuild-failed', entries: entries === null ? null : entries.length, after };
                 captureStuck('blank-grace/rebuild-failed', after);
               }, 900);
@@ -1110,9 +1980,9 @@ const DEBUG = (() => {
                 healBlankMarkers();
                 return true;
               }
-              captureStuck(why, conversationProbe(true));
+              captureStuck(why, conversationProbe(DIAG));
               const reactivated = reactivateChat();
-              const after = conversationProbe(true);
+              const after = conversationProbe(DIAG);
               state.heal = {
                 action: reactivated ? 'reactivated' : 'stuck',
                 at: Math.round(performance.now()),
@@ -1132,6 +2002,7 @@ const DEBUG = (() => {
             // Keep the pre-repair assembler state; a later successful repair
             // must not erase the only evidence of what broke.
             const captureStuck = (why, conversation) => {
+              if (!DIAG) return;
               try {
                 const payload = {
                   at: new Date().toISOString(),
@@ -1235,7 +2106,7 @@ const DEBUG = (() => {
                 at: Math.round(now),
                 why,
                 count: rec.rebuilds,
-                before: conversationProbe(true),
+                before: conversationProbe(DIAG),
               };
               if (rebuilt) {
                 healBlankMarkers();
@@ -1249,7 +2120,7 @@ const DEBUG = (() => {
                 }, 400);
                 timers.add(timer);
               } else {
-                captureStuck(why + '/rebuild-unavailable', conversationProbe(true));
+                captureStuck(why + '/rebuild-unavailable', conversationProbe(DIAG));
               }
               return rebuilt;
             };
@@ -1371,7 +2242,7 @@ const DEBUG = (() => {
                 flows,
                 slotErrors: [...document.querySelectorAll('[data-slot-error]')].map((node) => node.getAttribute('data-slot-error')),
                 factoryErrors: [...document.querySelectorAll('[data-factory-error]')].map((node) => node.getAttribute('data-factory-error')),
-                client: { build: BUILD, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, healed: state.healed, repairs: state.repairs, advance: state.advance, prewarm: state.prewarm, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error },
+                client: { build: BUILD, lazyGroups: state.lazyGroups, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, healed: state.healed, repairs: state.repairs, advance: state.advance, prewarm: state.prewarm, restorePrewarm: state.restorePrewarm, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error },
                 fibers: fiberProbe(),
                 feed: sessionFeed(true),
                 conversation: conversationProbe(true),
@@ -1390,6 +2261,7 @@ const DEBUG = (() => {
             };
 
             const publish = (payload) => {
+              if (!DIAG) return;
               try {
                 window.__DSH_FASTLOAD__.last = payload;
               } catch {}
@@ -1405,7 +2277,8 @@ const DEBUG = (() => {
               } catch {}
             };
 
-            window.__DSH_FASTLOAD__ = {
+            // The diagnostic surface is materialised only on the opt-in path.
+            const diagnosticsApi = {
               probe,
               publish,
               rebuild: rebuildConversation,
@@ -1455,17 +2328,23 @@ const DEBUG = (() => {
               },
               guard: () => guardCheck('manual'),
               deep: () => conversationProbe(true),
+              lazy: () => (state.lazyGroups ? JSON.parse(JSON.stringify(state.lazyGroups)) : null),
               last: null,
             };
+            if (DIAG) window.__DSH_FASTLOAD__ = diagnosticsApi;
 
-            for (const delay of [0, 40, 110, 250, 500, 900, 1500]) {
-              const timer = setTimeout(() => {
-                timers.delete(timer);
-                if (!DEBUG) return;
-                instrumentFlush();
-                instrumentBuilder();
-              }, delay);
-              timers.add(timer);
+            // Prototype instrumentation retries until the assembler/builder
+            // prototypes exist. It is the most invasive layer, so it needs both
+            // switches; with them off no timer is registered at all.
+            if (INSTRUMENT) {
+              for (const delay of [0, 40, 110, 250, 500, 900, 1500]) {
+                const timer = setTimeout(() => {
+                  timers.delete(timer);
+                  instrumentFlush();
+                  instrumentBuilder();
+                }, delay);
+                timers.add(timer);
+              }
             }
 
             // An open transcript with a "Load older" button but no rendered
@@ -1478,11 +2357,20 @@ const DEBUG = (() => {
               // A page button is the marker of an installed window: without it
               // an empty transcript is a legitimately empty session.
               if (olderButtonOf(flow) === null) return;
+              // Cheap DOM first: only a slot that already looks blank is worth
+              // a fiber walk. The old order walked the fiber tree on every scan
+              // of every mounted transcript, which was pure overhead when rows
+              // were rendered normally.
+              const domBlank = slot.getBoundingClientRect().height <= 1 && (slot.innerText || '').trim() === '';
+              if (!domBlank) {
+                blankFirstSeen.delete(flow);
+                return;
+              }
+              // On this (rare) path the fiber stays the tie-breaker: rows handed
+              // to the slot but not painted yet are not a broken window, and
+              // rebuilding them would be the wrong repair.
               const entries = entriesOf(flow);
-              const empty = entries !== null
-                ? entries.length === 0
-                : slot.getBoundingClientRect().height <= 1 && (slot.innerText || '').trim() === '';
-              if (!empty) {
+              if (entries !== null && entries.length > 0) {
                 blankFirstSeen.delete(flow);
                 return;
               }
@@ -1496,8 +2384,11 @@ const DEBUG = (() => {
               blankHandled.add(flow);
               blankFirstSeen.delete(flow);
               flow.setAttribute('data-fastload-blank', '');
-              const payload = probe();
-              publish(payload);
+              let payload = null;
+              if (DIAG) {
+                payload = probe();
+                publish(payload);
+              }
               try {
                 originalError('[dsh-fastload] empty transcript with a page button', payload);
               } catch {}
@@ -1506,13 +2397,15 @@ const DEBUG = (() => {
 
             const scan = () => {
               state.scans += 1;
-              try {
-                flowSample();
-              } catch {}
+              if (DIAG) {
+                try {
+                  flowSample();
+                } catch {}
+              }
               try {
                 ensureGuard();
                 staleResync(currentSessionId());
-                if (DEBUG) {
+                if (INSTRUMENT) {
                   instrumentFlush();
                   instrumentBuilder();
                 }
@@ -1543,8 +2436,18 @@ const DEBUG = (() => {
 
             return () => {
               disposed = true;
+              try { disposeLazyGroups(); } catch {}
+              stopRestoreWatch();
+              if (restorePrewarm.stage === 'waiting'
+                || restorePrewarm.stage === 'queued'
+                || restorePrewarm.stage === 'running') {
+                restorePrewarm.stage = 'cancelled';
+                restorePrewarm.reason = 'disposed';
+                restorePrewarm.at = Date.now();
+              }
               cancelPendingPrewarm();
               prewarmQueue.length = 0;
+              prewarm.queued = 0;
               try {
                 if (prewarmActive !== null) prewarmActive.controller.abort();
               } catch {}
@@ -1560,9 +2463,11 @@ const DEBUG = (() => {
               for (const type of inputEvents) {
                 document.removeEventListener(type, noteInput, { capture: true });
               }
-              window.removeEventListener('error', onError);
-              window.removeEventListener('unhandledrejection', onRejection);
-              if (console.error === quietError) console.error = originalError;
+              if (DIAG) {
+                window.removeEventListener('error', onError);
+                window.removeEventListener('unhandledrejection', onRejection);
+              }
+              if (quietError !== null && console.error === quietError) console.error = originalError;
             };
           });
         },

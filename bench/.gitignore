@@ -1,0 +1,9 @@
+results/
+.chrome/
+.home/
+tmp/
+samples.local.json
+.tools/
+
+.s4-out/
+.s4-matrix/

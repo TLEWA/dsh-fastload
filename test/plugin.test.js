@@ -26,9 +26,15 @@ function snapshot(turnCount = 4, textSize = 4000) {
   return { type: 'snapshot', records, hasMore: true };
 }
 
+// The variant a real client open resolves to after the wrapper normalises it.
+const CANONICAL_VARIANT = JSON.stringify([100, 40, 2, true, 0, 8 * 1024 * 1024, 2, true]);
+
 function makeContext(options = {}) {
   const calls = [];
   const disposers = [];
+  let offCalls = 0;
+  const listeners = new Map();
+  const registrations = [];
   const follow = async function* (request) {
     calls.push(request);
     yield snapshot();
@@ -45,16 +51,67 @@ function makeContext(options = {}) {
       disposers.push(dispose);
       return dispose;
     },
+    on(name, listener, listenOptions) {
+      if (options.onThrows) throw new Error(options.onThrows);
+      if (options.onThrowsAt === name) {
+        throw new Error(options.onThrowsAtMessage || options.onThrowsAt + ' registration failed');
+      }
+      const entry = { name, listener, options: listenOptions };
+      registrations.push(entry);
+      if (!listeners.has(name)) listeners.set(name, new Set());
+      listeners.get(name).add(entry);
+      return () => {
+        offCalls += 1;
+        listeners.get(name)?.delete(entry);
+        const index = registrations.indexOf(entry);
+        if (index >= 0) registrations.splice(index, 1);
+      };
+    },
     logger: { info() {} },
   };
   return {
     ctx,
     sc,
     calls,
+    registrations,
+    offCalls() {
+      return offCalls;
+    },
+    emit(name, ...args) {
+      for (const entry of [...(listeners.get(name) || [])]) entry.listener(...args);
+    },
+    listenerCount(name) {
+      return listeners.get(name)?.size || 0;
+    },
     dispose() {
       for (const dispose of disposers.splice(0).reverse()) dispose();
     },
   };
+}
+
+async function waitFor(predicate, timeoutMs = 3000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(predicate(), 'condition not met within ' + timeoutMs + 'ms');
+}
+
+// Page-cache writes are zstd-compressed off the main path, so a teardown that
+// removes the cache directory immediately after `dispose()` can race the last
+// write (ENOTEMPTY on Windows). Retry the removal briefly instead of failing.
+async function cleanupDir(dir) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    try {
+      await fsp.rm(dir, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error.code !== 'ENOTEMPTY' && error.code !== 'EBUSY' && error.code !== 'EPERM') throw error;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  await fsp.rm(dir, { recursive: true, force: true });
 }
 
 async function withEnv(values, fn) {
@@ -408,7 +465,7 @@ test('serves a cached opening and swallows the duplicate live opening', async ()
       second.dispose();
     });
   } finally {
-    await fsp.rm(dir, { recursive: true, force: true });
+    await cleanupDir(dir);
   }
 });
 
@@ -447,6 +504,446 @@ test('replays events appended after the cached cursor', async () => {
       second.dispose();
     });
   } finally {
-    await fsp.rm(dir, { recursive: true, force: true });
+    await cleanupDir(dir);
+  }
+});
+
+test('keeps idle refresh off by default and registers no listeners', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '0',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({ services: { sessionPersistence: persistence } });
+        apply(t.ctx);
+        assert.equal(t.listenerCount('session/event'), 0);
+        assert.equal(t.listenerCount('agent/status'), 0);
+        assert.equal(t.listenerCount('session/disposed'), 0);
+        assert.equal(globalThis.__DSH_FASTLOAD__.idleRefresh, null);
+        t.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('idle refresh warms the canonical page and never activates the Agent', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-idle' }), open: async () => ({}) };
+  const page = {
+    type: 'snapshot',
+    cursor: 3,
+    hasMore: true,
+    assistantStream: { revision: 0 },
+    records: [
+      rec(1, 'turn/start'),
+      rec(2, 'user/message', { message: { content: 'q' } }),
+      rec(3, 'assistant/message', { message: { content: 'a' } }),
+    ],
+  };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({ services: { sessionPersistence: persistence } });
+        t.sc.follow = async function* (request) {
+          this.calls.push(request);
+          yield page;
+        };
+        apply(t.ctx, {
+          refresh: {
+            timings: { idleMs: 5, settleMs: 0, minGapMs: 0, busyRetryMs: 5, buildTimeoutMs: 5000 },
+            probeLoad: async () => 0,
+          },
+        });
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.equal(state.idleRefresh && state.idleRefresh.active, true);
+        assert.equal(t.listenerCount('session/event'), 1);
+        assert.equal(t.listenerCount('agent/status'), 1);
+        assert.equal(t.listenerCount('session/disposed'), 1);
+        assert.equal(t.registrations.every((entry) => entry.options && entry.options.global === true), true);
+
+        const hitsBefore = state.pageCacheHits;
+        t.emit('session/event', { id: 'session-idle' });
+        await waitFor(() => state.pageCache && state.pageCache.stats.writes >= 1);
+        await state.pageCache.flush();
+
+        const probe = await state.pageCache.lookup('session-idle', CANONICAL_VARIANT);
+        assert.equal(probe.hit, true);
+        assert.deepEqual(probe.opening.records, page.records);
+        assert.equal(state.pageCacheHits, hitsBefore, 'a refresh is not a client hit');
+        assert.equal(state.idleRefresh.stored >= 1, true);
+
+        const refreshCall = t.calls[t.calls.length - 1];
+        assert.equal(refreshCall.activate, false, 'a refresh must never activate an Agent');
+        assert.deepEqual(refreshCall.address, { kind: 'session', sessionId: 'session-idle' });
+        assert.equal(refreshCall.assistantStream, true);
+        assert.equal(refreshCall.maxMessages, 100);
+
+        t.dispose();
+        assert.equal(t.listenerCount('session/event'), 0);
+        assert.equal(t.listenerCount('agent/status'), 0);
+        assert.equal(t.listenerCount('session/disposed'), 0);
+        assert.equal(state.installed, false);
+        assert.equal(t.sc.__dshFastload, undefined);
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('leaves follow working when the Host cannot register event listeners', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({ services: { sessionPersistence: persistence }, onThrows: 'no event bus' });
+        apply(t.ctx);
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.equal(state.idleRefresh.active, false);
+        assert.match(state.idleRefresh.disabledReason, /no event bus/);
+        assert.equal(t.listenerCount('session/event'), 0);
+
+        const stream = t.sc.follow({ maxMessages: 500, address: { kind: 'session', sessionId: 's-1' } });
+        const first = await stream.next();
+        assert.equal(first.value.type, 'snapshot');
+        assert.equal(t.calls.length, 1);
+        t.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('re-applying with idle refresh keeps a single refresher', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({ services: { sessionPersistence: persistence } });
+        apply(t.ctx);
+        assert.equal(t.listenerCount('session/event'), 1);
+        const report = globalThis.__DSH_FASTLOAD__.idleRefresh;
+        apply(t.ctx);
+        assert.equal(t.listenerCount('session/event'), 1);
+        assert.equal(globalThis.__DSH_FASTLOAD__.idleRefresh, report);
+        t.dispose();
+        assert.equal(t.listenerCount('session/event'), 0);
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('re-applying with deferred live build keeps one gate and its counters', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_DEFER_LIVE_BUILD: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext();
+        const options = { defer: { statusOf: () => 'idle' } };
+        apply(t.ctx, options);
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.ok(state.deferLiveBuild);
+        assert.equal(t.sc.__dshFastload, true);
+        const report = state.deferLiveBuild;
+        apply(t.ctx, options);
+        assert.equal(t.sc.__dshFastload, true);
+        assert.equal(state.deferLiveBuild, report, 're-apply must not detach the live counters');
+        t.dispose();
+        assert.equal(state.installed, false);
+        assert.equal(t.sc.__dshFastload, undefined);
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+const cachedPage = () => ({
+  type: 'snapshot',
+  cursor: 3,
+  hasMore: true,
+  assistantStream: { revision: 0 },
+  records: [rec(1, 'turn/start'), rec(2, 'user/message', { message: { content: 'q' } }), rec(3, 'assistant/message', { message: { content: 'a' } })],
+});
+
+async function warmOnePage(dir, persistence, env) {
+  return withEnv(env, async () => {
+    const t = makeContext({ services: { sessionPersistence: persistence } });
+    t.sc.follow = async function* (request) {
+      this.calls.push(request);
+      yield cachedPage();
+    };
+    apply(t.ctx);
+    const stream = t.sc.follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-test' } });
+    // Drain the stream so the wrapper observes the live frame, verifies the
+    // cursor and stores the page; reading only the first frame never stores.
+    for await (const _frame of stream) { /* drain */ }
+    await globalThis.__DSH_FASTLOAD__.pageCache.flush();
+    t.dispose();
+  });
+}
+
+test('honors DSH_FASTLOAD_DEFER_LIVE_BUILD=0 and serves the cache unchanged', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+    DSH_FASTLOAD_DEFER_LIVE_BUILD: '0',
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({ services: { sessionPersistence: persistence } });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx);
+      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild, null);
+      const stream = t.sc.follow({ maxMessages: 500, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      const first = await stream.next();
+      assert.equal(first.value.type, 'snapshot');
+      const end = await stream.next();
+      assert.equal(end.done, true);
+      t.dispose();
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('enables deferred live build by default without guessing the Agent state', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({ services: { sessionPersistence: persistence } });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx);
+      const report = globalThis.__DSH_FASTLOAD__.deferLiveBuild;
+      assert.ok(report, 'the deferred live build is installed by default');
+      assert.equal(report.enabled, true);
+      const stream = t.sc.follow({ maxMessages: 500, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      const first = await stream.next();
+      assert.equal(first.value.type, 'snapshot');
+      assert.equal((await stream.next()).done, true);
+      // No agents service means the status is unknown, so the cache is served
+      // with the stock ordering instead of being delayed.
+      assert.equal(report.deferrals, 0);
+      t.dispose();
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('defers a passive cache hit only when the Agent is known idle', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+    DSH_FASTLOAD_DEFER_LIVE_BUILD: '1',
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({
+        services: {
+          sessionPersistence: persistence,
+          agents: { get: () => ({ status: 'idle' }) },
+        },
+      });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx, { defer: { budgetMs: 3, maxSlices: 3 } });
+      const report = globalThis.__DSH_FASTLOAD__.deferLiveBuild;
+      assert.equal(report.enabled, true);
+      assert.equal(report.budgetMs, 3);
+      const stream = t.sc.follow({ maxMessages: 500, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      assert.equal((await stream.next()).value.type, 'snapshot');
+      assert.equal((await stream.next()).done, true);
+      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild.deferrals, 1);
+      t.dispose();
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('never defers an activating or paged follow', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+    DSH_FASTLOAD_DEFER_LIVE_BUILD: '1',
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({
+        services: {
+          sessionPersistence: persistence,
+          agents: { get: () => ({ status: 'idle' }) },
+        },
+      });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx, { defer: { budgetMs: 3, maxSlices: 3 } });
+      const activating = t.sc.follow({ maxMessages: 500, activate: true, address: { kind: 'session', sessionId: 'session-test' } });
+      assert.equal((await activating.next()).value.type, 'snapshot');
+      assert.equal((await activating.next()).done, true);
+      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild.deferrals, 0);
+
+      const paged = t.sc.follow({ maxMessages: 500, beforeSeq: 10, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      assert.equal((await paged.next()).value.type, 'snapshot');
+      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild.deferrals, 0);
+      t.dispose();
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('disposing the plugin clears a pending deferral', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+    DSH_FASTLOAD_DEFER_LIVE_BUILD: '1',
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({
+        services: {
+          sessionPersistence: persistence,
+          agents: { get: () => ({ status: 'idle' }) },
+        },
+      });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx, { defer: { budgetMs: 500, maxSlices: 4 } });
+      const stream = t.sc.follow({ maxMessages: 500, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      assert.equal((await stream.next()).value.type, 'snapshot');
+      // The deferral is pending now; tearing the plugin down must release it.
+      const next = stream.next();
+      t.dispose();
+      const settled = await Promise.race([
+        next.then((step) => step.done === true || step.value.type === 'event'),
+        new Promise((resolve) => setTimeout(() => resolve('timeout'), 2000)),
+      ]);
+      assert.notEqual(settled, 'timeout');
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+
+test('releases idle refresh listeners when a later registration throws', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({
+          services: { sessionPersistence: persistence },
+          onThrowsAt: 'agent/status',
+          onThrowsAtMessage: 'agent/status registration failed',
+        });
+        apply(t.ctx, {
+          refresh: {
+            timings: { idleMs: 5, settleMs: 0, minGapMs: 0, busyRetryMs: 5, buildTimeoutMs: 5000 },
+            probeLoad: async () => 0,
+          },
+        });
+
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.equal(state.idleRefresh.active, false);
+        assert.match(state.idleRefresh.disabledReason, /agent\/status registration failed/);
+        assert.equal(t.offCalls(), 1, 'the already-registered session/event listener was released');
+        assert.equal(t.registrations.length, 0);
+        assert.equal(t.listenerCount('session/event'), 0);
+        assert.equal(t.listenerCount('agent/status'), 0);
+        assert.equal(t.listenerCount('session/disposed'), 0);
+
+        // A residual listener would schedule a refresh here; the released
+        // subscription must not start a follow.
+        t.emit('session/event', { id: 'session-idle' });
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        assert.equal(t.calls.length, 0);
+        t.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
   }
 });

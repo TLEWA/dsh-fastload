@@ -230,6 +230,8 @@ export function createPageCache(options) {
   }
 
   const api = {
+    /** Format generation; consumers (idle refresh) refuse unknown versions. */
+    version: PAGE_CACHE_VERSION,
     enabled,
     dir: root,
     stats,
