@@ -213,13 +213,14 @@ export async function measureOnce({
     await cdp.send('Network.enable');
     await cdp.send('Network.setCacheDisabled', { cacheDisabled: false });
     await cdp.send('Network.clearBrowserCache');
+    const docStartExtra = process.env.BENCH_DOC_START_JS || '';
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', {
       source: '(' + installProbe.toString() + ')(' + JSON.stringify({
         blankSessionId,
         targetSessionId,
         reactHook: true,
         timeoutMs: probeTimeoutMs,
-      }) + ')',
+      }) + ')' + (docStartExtra ? ';' + docStartExtra : ''),
     });
 
     cdp.on('Runtime.exceptionThrown', (p) => {

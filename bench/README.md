@@ -62,6 +62,8 @@ Windows 下创建 junction（MSYS 的 cmd //c mklink 可能报“无效开关”
 
 每个重复新建 Chrome target；冷 host 每个重复停 host、删除 cache/dsh-fastload、重启 host。所有 sessionId 只出现在 raw.json（已 gitignore），报告使用打码 ID。
 
+客户端开关 A/B：设置 `BENCH_DOC_START_JS`（如 `window.__DSH_FASTLOAD_PREWARM__=false;window.__DSH_FASTLOAD_RESTORE_PREWARM__=true;`）后，`lib/measure.mjs` 会在 document-start 探针中注入这段脚本，用于在同一 fixture/DSH 版本上切换客户端实验开关；Host 侧开关仍用进程环境变量。该变量只影响测量页，不写入仓库。
+
 ## 场景
 
 - cold-host：Cold Host + Cold Session；删整个 cache/dsh-fastload 并重启 host。
