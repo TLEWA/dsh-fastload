@@ -579,6 +579,37 @@ test('dispose aborts an in-flight capture and settles drain', async () => {
   assert.equal(t.refresh.report.active, false);
 });
 
+test('aborts an in-flight capture when the session is disposed', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let signalSeen = null;
+  const t = make({
+    follow: async function* (request, signal) {
+      signalSeen = signal;
+      await gate;
+      yield frame();
+    },
+  });
+  try {
+    t.refresh.noteActivity('session-a');
+    await t.clock.fireNext();
+    await waitFor(() => t.refresh.report.inFlight === 'session-a');
+
+    t.refresh.noteDisposed('session-a');
+    assert.equal(signalSeen.aborted, true, 'the disposed build signal is aborted before the map entry is dropped');
+    release();
+    await waitFor(() => t.refresh.report.inFlight === null);
+
+    assert.equal(t.state.calls.store, 0, 'a disposed build never publishes');
+    assert.equal(t.refresh.report.built, 0);
+    assert.equal(t.refresh.report.aborted, 1);
+    assert.equal(t.refresh.report.queued, 0);
+  } finally {
+    if (release) release();
+    t.refresh.dispose();
+  }
+});
+
 test('forgetting a disposed session lets a re-created one build again', async () => {
   const t = make();
   try {

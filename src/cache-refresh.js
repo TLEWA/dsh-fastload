@@ -720,6 +720,15 @@ export function createCacheRefresh(options = {}) {
         const id = normalizeId(sessionId);
         if (id === null) return;
         cancel(id);
+        // A build may already be reading its opening frame. Abort it before
+        // dropping the map entry: otherwise a disposed Session keeps the one
+        // global build slot (and can still store) with no way to cancel it.
+        const inflight = runningBuilds.get(id);
+        if (inflight) {
+          try {
+            inflight.abort();
+          } catch {}
+        }
         runningBuilds.delete(id);
         agentStatus.delete(id);
         lastStored.delete(id);
