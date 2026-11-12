@@ -1,0 +1,17 @@
+{
+  "workspace": "C:/path/to/the/workspace/used/by/dsh",
+  "samples": [
+    {
+      "key": "normal",
+      "label": "普通会话",
+      "kind": "normal",
+      "sessionId": "session-00000000-0000-0000-0000-000000000000"
+    },
+    {
+      "key": "long",
+      "label": "工具步骤密集长会话",
+      "kind": "long",
+      "sessionId": "session-11111111-1111-1111-1111-111111111111"
+    }
+  ]
+}

@@ -4,3 +4,8 @@ node_modules/
 *.log
 .DS_Store
 coverage/
+bench/results/
+bench/.chrome/
+bench/.home/
+bench/samples.local.json
+bench/.tools/

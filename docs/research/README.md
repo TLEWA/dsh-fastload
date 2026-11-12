@@ -10,6 +10,9 @@ the exploratory workspace on 2026-11-09.
   blank-page counterexample and the maxBytes rich-tail/empty-tail comparison.
 - `dsh-long-session-open-lag.patch.md` — draft patch notes, not applied to the
   installed DSH build.
+- `plugin-optimization-baseline.md` — stage 0 reproducible first-open baseline:
+  cold/warm host, cold session, page-cache hit and forced invalidation, with
+  renderer/host timing split and per-run raw samples.
 
 The documents contain machine-specific absolute paths from the test machine;
 they are retained for reproducibility, not as install instructions.
