@@ -5,7 +5,7 @@ All notable changes are documented here. Versions follow
 
 [简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md)
 
-## [Unreleased]
+## [0.3.1] - 2026-11-12
 
 ### Added
 
