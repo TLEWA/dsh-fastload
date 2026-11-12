@@ -10,7 +10,7 @@ export const DEFAULTS = Object.freeze({
   stripStream: true,
   pageCache: true,
   idleCacheRefresh: false,
-  deferLiveBuild: false,
+  deferLiveBuild: true,
   rewindAware: true,
   pageCacheMaxBytes: 96 * 1024 * 1024,
   pageCacheMaxFiles: 400,

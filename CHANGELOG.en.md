@@ -9,6 +9,11 @@ All notable changes are documented here. Versions follow
 
 ### Added
 
+- **Deferred live build is now on by default (stage 8 follow-up, not released).**
+  `DSH_FASTLOAD_DEFER_LIVE_BUILD` now defaults to `1`; `0`/`off`/`no` still turn it off. A real click in DSH 0.2.2-rc.1 opens with `activate=true`, so the click path
+  never defers and shows no measurable benefit; only passive `activate:false` requests such
+  as prewarm or restore wait for at most 16 ms. Set `DSH_FASTLOAD_DEFER_LIVE_BUILD=0` to
+  restore the stage-3 ordering.
 - **Stage 8 final integration, regression and release preparation (local branch, not
   released).** Merged the stage 2+3+6 integration head with the stage 5 deferred live build,
   the stage 0 baseline and the stage 4 CSS NO-GO report as `feat/optimization-final`. Of the
@@ -17,8 +22,9 @@ All notable changes are documented here. Versions follow
   cache-hit path ran 10 opens per sample on the same isolated fixture with DSH 0.2.2-rc.1,
   comparing "all switches off" and "all switches on" against the stage 0 stock numbers.
   Stage 7's 7A client-validation work and 7B private tail reader are **not implemented**
-  because no hard data supports them. Every experimental switch still defaults to off;
-  disabling or uninstalling restores `follow` through the disposer, while hot reload depends
+  because no hard data supports them. Other experimental switches still default to off
+  (defer is the exception, see above); disabling or uninstalling restores `follow` through
+  the disposer, while hot reload depends
   on the host calling the disposer and was not verified on a real host in this stage. Full
   tables, limits and
   unexecuted tests are in `docs/research/plugin-optimization-final-report.md`.

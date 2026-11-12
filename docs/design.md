@@ -197,8 +197,9 @@ On a page-cache hit the wrapper yields the cached snapshot, waits for the caller
 resume (the browser can mount the cached frame), and only then starts the real
 `follow`; that build replays just the events after the cached cursor. Stage 5
 asked whether this build actually competes with painting the cached first frame.
-A switch, off by default, can defer the build after the cached frame. The
-measurement below is the reason it should stay off.
+A switch can defer the build after the cached frame; it is on by default since stage 8
+(`DSH_FASTLOAD_DEFER_LIVE_BUILD=0` turns it off). The measurement below is why stage 5
+shipped it off and why it is not a performance feature.
 
 ### Instrumentation
 
@@ -223,7 +224,8 @@ default path does no clock reads and writes no extra bytes.
 
 ### Gate and scheduling
 
-`DSH_FASTLOAD_DEFER_LIVE_BUILD=1` delays only when every condition holds:
+Deferred live build is on by default (`DSH_FASTLOAD_DEFER_LIVE_BUILD=0` disables it) but delays
+only when every condition holds:
 
 - the request is an initial page (no `beforeSeq` / `throughSeq`);
 - `activate !== true` (a request that activates the Agent keeps the stock order);
@@ -279,9 +281,11 @@ result is not specific to one block.
 ### Conclusion
 
 No competition between the real follow build and the cached first frame was
-observable, so the switch stays off by default and enabling it is not recommended.
-The gate also refuses the inspected desktop client 0.2.2-rc.1, whose session
-restore hardcodes `activate: true`; the measured 0.2.1-rc.5 host sent
+observable, so stage 5 kept the switch off and did not recommend enabling it for
+performance. Stage 8 later made it on by default as a conservative ordering, but
+the gate refuses the inspected desktop client 0.2.2-rc.1, whose session restore
+hardcodes `activate: true`; a real click therefore never defers, and only passive
+`activate:false` requests can wait. The measured 0.2.1-rc.5 host sent
 `activate: false`. If the client timing changes, the switch and the timing line
 are available to repeat the measurement; otherwise this is a candidate for removal
 in a later cleanup.
@@ -327,8 +331,10 @@ Both candidates are therefore **not implemented**. Revisit only if a real profil
 
 The release candidate is the local branch `feat/optimization-final`, created from the stage
 2+3+6 integration head `b4a9966` and merged with stage 5 (`2de7618`), stage 0 (`1a0349f`) and
-stage 4 (`bcc73f9`) using `--no-ff`. All experimental switches stay off by default; the plugin
-version is unchanged. The regression matrix executed 13 scenarios (12 pass, 0 fail, 1 not
+stage 4 (`bcc73f9`) using `--no-ff`. The A/B measured every experimental switch off versus
+on before the later defer decision; in the final tree only deferred live build is on by
+default (and it is a no-op for activating clicks), while the other experimental switches
+stay off. The plugin version is unchanged. The regression matrix executed 13 scenarios (12 pass, 0 fail, 1 not
 executed because a subagent-origin session has no workspace row), and the performance A/B ran
 10 cache-hit opens per sample for "all switches off" and "all switches on" on the same
 fixture with DSH 0.2.2-rc.1. Every user-initiated open on that host sends `activate: true`,

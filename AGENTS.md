@@ -38,11 +38,13 @@
 - 预热构建前后都要校验 `sessionPersistence.stat` 的 revision 与缓存 key，不一致就丢弃，
   不得把旧页写到新 revision；同一 session 去重、全局并发 1，Agent 运行或 Host 事件循环
   延迟时推迟；卸载/禁用时必须清 timer、监听并 abort 在飞构建。
-- 延后真实 follow（`DSH_FASTLOAD_DEFER_LIVE_BUILD`，默认关闭）只能在缓存确实命中、初始页、
-  `activate !== true`、无进行中的流式 attempt 且 Agent 已知空闲时生效；无法判断状态一律不延后。
+- 延后真实 follow（`DSH_FASTLOAD_DEFER_LIVE_BUILD`，默认开启；`=0` 关闭）只能在缓存确实
+  命中、初始页、`activate !== true`、无进行中的流式 attempt 且 Agent 已知空闲时生效；无法
+  判断状态一律不延后。0.2.2-rc.1 的真实点击带 `activate=true`，因此点击路径实际不生效，
+  只覆盖 `activate:false` 的被动请求（预热/恢复），最多 16 ms。
   同 session 新请求、abort、Agent 转忙、卸载都必须取消未执行的延后；延后出错回退原时序，
-  且绝不能让 opening 协议出现第二个 snapshot。默认关闭时时序、字节、日志必须与阶段 3 一致；
-  `timing` 诊断只在 `DSH_FASTLOAD_DEBUG=1` 下采集。
+  且绝不能让 opening 协议出现第二个 snapshot。`DSH_FASTLOAD_DEFER_LIVE_BUILD=0` 时时序、
+  字节、日志必须与阶段 3 一致；`timing` 诊断只在 `DSH_FASTLOAD_DEBUG=1` 下采集。
 - 配置非法值必须回退到默认值；`maxBytes` 大于 0 时有 64 KiB 下限。
 
 ### 客户端不变量

@@ -32,8 +32,8 @@ test('config defaults are the tested safe page', () => {
   assert.equal(config.minTurns, 2);
   assert.equal(config.maxBytes, 0);
   assert.equal(config.enabled, true);
-  // Stage 5: the deferred live build is opt-in; a stock install never delays it.
-  assert.equal(config.deferLiveBuild, false);
+  // Stage 5 shipped the deferred live build off; stage 8 enables it by default.
+  assert.equal(config.deferLiveBuild, true);
 });
 
 test('parses DSH_FASTLOAD_DEFER_LIVE_BUILD with the shared boolean rules', () => {
@@ -42,8 +42,8 @@ test('parses DSH_FASTLOAD_DEFER_LIVE_BUILD with the shared boolean rules', () =>
   for (const value of ['0', 'false', 'FALSE', 'off', 'no']) {
     assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: value }).deferLiveBuild, false, value);
   }
-  // An empty value means "unset", so the default (off) applies.
-  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: '' }).deferLiveBuild, false);
+  // An empty value means "unset", so the new default (on) applies.
+  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: '' }).deferLiveBuild, true);
 });
 
 test('config clamps minMessages and byte floor', () => {

@@ -9,12 +9,17 @@
 
 ### 新增
 
+- **延后真实 follow 改为默认开启（阶段 8 后续决定，未发布）。**
+  `DSH_FASTLOAD_DEFER_LIVE_BUILD` 默认值从 `0` 改为 `1`；`0`/`off`/`no` 仍关闭。
+  DSH 0.2.2-rc.1 的真实点击打开带 `activate=true`，因此点击路径不会延后，也没有可测
+  收益；该开关只对预热、恢复等 `activate:false` 的被动请求最多延后 16 ms。设置
+  `DSH_FASTLOAD_DEFER_LIVE_BUILD=0` 即恢复阶段 3 的时序。
 - **阶段 8 最终集成、回归与发布准备（本地分支，未发布）。** 把阶段 2+3+6 集成头与阶段 5
   延后构建、阶段 0 基线、阶段 4 CSS NO-GO 报告合并为 `feat/optimization-final`。13 个可执行
   回归场景中 12 通过、0 失败、1 未执行（子代理来源会话没有 workspace 行，侧栏不可达）；缓存
   命中路径在同一隔离 fixture 与 DSH 0.2.2-rc.1 上各跑 10 次，对比“全部开关关闭 / 全部开启”
   并列出阶段 0 stock 数字。阶段 7 的 7A 客户端校验优化与 7B 私有尾部读取器因没有硬数据
-  **不实施**。所有实验开关仍默认关闭；禁用和卸载会经 disposer 还原 follow，热重载依赖
+  **不实施**。其他实验开关仍默认关闭（defer 例外，见上一条）；禁用和卸载会经 disposer 还原 follow，热重载依赖
   宿主调用 disposer、本阶段未做真机验证。完整表格、限制和
   未执行项见 `docs/research/plugin-optimization-final-report.md`。
 - **客户端核心/诊断分层（阶段 6，Web 端）。** 默认路径不再遍历 React Fiber 采样、

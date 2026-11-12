@@ -4,7 +4,7 @@
 > 仓库：`C:/Users/TLEWA/Desktop/DSHs/dsh-plugins/dsh-fastload`，独立 git 仓，基线 `main` =
 > `04723c8`。工作树：`libs/.worktrees/stage8-release`。分支：`feat/optimization-final`。
 > 范围：只改插件仓；未改 DSH 上游或 `app.asar`；未改会话原始日志；未 push、未打 tag、
-> 未改版本号、未发布。所有侵入性优化仍默认关闭。
+> 未改版本号、未发布。除 `DSH_FASTLOAD_DEFER_LIVE_BUILD` 后续改为默认开启外，其余侵入性优化仍默认关闭。
 > 关联：`plugin-optimization-baseline.md`（阶段 0）、`css-content-visibility-experiment.md`
 > （阶段 4）、`docs/design.md`（阶段 5/7/8 决策）、`AGENTS.md`（私有接口与能力检测）。
 
@@ -14,8 +14,8 @@
    `feat/optimization-final`；合并保留阶段 5 的 index.js 时序、阶段 3 的 cache-refresh、
    阶段 0 的 bench/docs 与阶段 4 的 CSS NO-GO 报告，工作区干净。
 2. **回归通过。** 16 项矩阵中 12 项通过、0 项失败、4 项完全未执行、2 项部分覆盖；所有
-   可执行项均无页面异常、无测试失败。`npm test` 112/112，`dsh-ci-gate` PASS
-   （16 ok / 0 warn / 0 fail / 2 skip）。
+   可执行项均无页面异常、无测试失败。`npm test` 112/112（阶段 8 测量时；后续 defer
+   默认开启并补测试后 113/113），`dsh-ci-gate` PASS（16 ok / 0 warn / 0 fail / 2 skip）。
 3. **A/B 无回归、无可测收益。** 同一 fixture、同一 DSH 0.2.2-rc.1、同一 Chrome
    157.0.8103.52 下各 10 次缓存命中：normal 中位 467.7 ms（全关）对 467.2 ms（全开），
    long 234.9 ms 对 249.4 ms，差异在噪声范围内；WS 字节、records、DOM 与 React commit
@@ -24,8 +24,8 @@
 4. **阶段 7 不实施。** 7A（客户端事件校验优化）与 7B（私有只读尾部读取器）均无硬数据
    支持；本次 A/B 中点击窗口只有 1 个 >50 ms Long Task，与 React mount 的
    snapshot→首行同量级，没有校验/尾部读取归因证据。重访条件见第 4 节。
-5. **发布建议：有条件进入发布评审，不直接发布。** 条件：人工确认 defer 开关保留策略、
-   桌面 GUI 回归、PR/CI/review 与版本决策；这些不在本分支权限内。
+5. **发布建议：有条件进入发布评审，不直接发布。** 条件：完成桌面 GUI 手工回归、人工
+   评审报告与发布内容、PR/CI/review 与版本决策；这些不在本分支权限内。
 
 ## 2. 实施结果
 
@@ -45,7 +45,7 @@
 合并后的功能保留核对：
 
 - 阶段 5：`src/defer-live-build.js`、`index.js` 中缓存帧发送与真实 follow 之间的
-  可取消延后、`serve.log` 的 `timing` 行；默认关闭。
+  可取消延后、`serve.log` 的 `timing` 行；阶段 5 默认关闭（阶段 8 后续改为默认开启，见 2.3 表注）。
 - 阶段 3：`src/cache-refresh.js` 与 `src/page-cache.js` 的 idle refresh 路径；
   `DSH_FASTLOAD_IDLE_CACHE_REFRESH` 默认 `0`。
 - 阶段 0：`bench/` 工具、`docs/research/plugin-optimization-baseline.md`。
@@ -89,7 +89,7 @@ Host 端环境变量：
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | 首帧剥离 replay 用 `data.stream` | 既有行为，未改 |
 | `DSH_FASTLOAD_REWIND_AWARE` | `1` | 初始页被 `/rewind` 全隐藏时向前扩一页 | 单测覆盖；真机未执行（无夹具） |
 | `DSH_FASTLOAD_IDLE_CACHE_REFRESH` | `0` | 空闲只读 follow 预热页缓存 | A/B 全开组开启；默认关已核对 |
-| `DSH_FASTLOAD_DEFER_LIVE_BUILD` | `0` | 缓存帧后最多延后真实 follow 16 ms | A/B 全开组开启；实测未触发（见 5.3） |
+| `DSH_FASTLOAD_DEFER_LIVE_BUILD` | `1`（阶段 8 测量时为 `0`） | 缓存帧后最多延后真实 follow 16 ms | A/B 全开组开启；实测未触发（见 5.3）；后续决定默认开启（见下方表注） |
 | `DSH_FASTLOAD_SERVE_LOG` | `1` | 写 `serve.log`（512 KiB 轮转） | 矩阵/A-B 均读取成功 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条日志 | 未作为发布开关 |
 | `DSH_FASTLOAD_CACHE_DIR` | 空 | 缓存目录；空 = `$DSH_HOME/cache/dsh-fastload` | 隔离 home 验证 |
@@ -105,7 +105,12 @@ Host 端环境变量：
 说明：任务清单中的“`DSH_FASTLOAD_PREWARM`（若存在）”经代码检索**不存在**为 Host
 环境变量；存在的只有客户端键 `window.__DSH_FASTLOAD_PREWARM__`（以及同名
 localStorage 键），其默认值沿用 0.3.1 的“开”。本阶段新增的侵入项
-（restore-prewarm、idle refresh、defer live build、diagnostics）全部默认关。
+（restore-prewarm、idle refresh、defer live build、diagnostics）在阶段 8 测量时全部默认关；
+后续仅 defer 改为默认开启，见下方表注。
+
+> 后续决定（2026-11-12）：`DSH_FASTLOAD_DEFER_LIVE_BUILD` 默认开启。点击路径仍无可测
+> 收益；defer 在 0.2.2-rc.1 的 `activate=true` 路径不生效，只覆盖 `activate:false` 的
+> 预热/恢复请求，最多 16 ms；设置 `=0` 关闭并恢复阶段 3 时序。
 
 ## 3. 阶段 7 决策（不实现 7A/7B）
 
@@ -192,6 +197,8 @@ node libs/bench/stage8/matrix.mjs ... --cases live,rewind,approval,multiwrap,hot
 | `npx --yes --package=github:TLEWA/dsh-plugin-ci#v1 dsh-ci-gate` | **PASS**：16 ok / 0 warn / 0 fail / 2 skip；manifest `dsh-fastload@0.3.1`；skip 为 `artifacts.fresh`、`typecheck` |
 
 gate 的 2 个 skip 是仓库既有的无构建产物/无 TS 配置场景，不是本阶段引入。
+阶段 8 后续把 `DSH_FASTLOAD_DEFER_LIVE_BUILD` 默认开启并补测试后，`npm test` 为
+113/113，gate 仍 PASS。
 最终复跑时 GitHub 恰好不可达（`git ls-remote` 在 21 s 后返回 128），因此改用
 npm `_npx` 缓存中同一次 `npx` 安装的 `dsh-plugin-ci@1.2.0` 直接执行
 `scripts/ci-gate.mjs`；检查项与早先 `npx` 运行一致，均为 PASS。
@@ -271,7 +278,8 @@ if (!follow || follow.activate === true) {
 follow”对被用户点开的请求是 no-op；本 A/B 的 ON 组实际只开启了 idle refresh 与
 prewarm/restore，并未测到 defer 的收益。报告不把 ON/OFF 差异归因于 defer。该结果
 与阶段 5 在 0.2.1-rc.5 上的结论一致：defer 只对 `activate !== true` 的被动请求
-生效；默认关闭是安全的。若未来客户端改为被动恢复，可复测；否则该开关是后续清理
+生效；阶段 8 当时默认关闭是安全的。后续决定默认开启（点击路径仍 no-op，`=0` 可关闭），
+若未来客户端改为被动恢复，可复测；否则该开关仍是后续清理
 候选。
 
 ### 5.4 判读
@@ -311,7 +319,8 @@ prewarm/restore，并未测到 defer 的收益。报告不把 ON/OFF 差异归�
 
 ### 6.3 回退与卸载
 
-- 所有实验开关默认关；关掉即回到阶段 2/3/6 的默认路径，不需要迁移数据。
+- 除 `DSH_FASTLOAD_DEFER_LIVE_BUILD` 外，实验开关默认关；defer 默认开启但在 0.2.2-rc.1
+  的点击路径 no-op，`=0` 即回到阶段 3 时序。关掉实验开关不需要迁移数据。
 - 禁用/卸载由 disposer 还原 `follow`、删除 `__dshFastload`、停止 idle timer/
   监听/在飞构建、取消未执行延后、flush 页缓存；矩阵 plugin-disabled 已验证页面
   仍可用。
@@ -356,18 +365,20 @@ prewarm/restore，并未测到 defer 的收益。报告不把 ON/OFF 差异归�
 
 建议顺序：
 
-1. 人工评审本分支与最终报告，确认是否保留 `DSH_FASTLOAD_DEFER_LIVE_BUILD`
-   （当前默认关且在 0.2.2-rc.1 no-op），或把它标记为移除候选。
+1. 人工评审本分支与最终报告。后续决定（2026-11-12）已把
+   `DSH_FASTLOAD_DEFER_LIVE_BUILD` 改为默认开启：点击路径仍无可测收益，defer 在
+   0.2.2-rc.1 的 `activate=true` 路径不生效；评审确认接受该默认值，或改回默认关/移除。
 2. 在真实桌面 GUI 做一次手工回归（普通长会话打开、禁用/启用插件、切换会话），
    补上 CLI/headless 无法覆盖的 Electron 路径。
 3. 由维护者决定版本号并打 tag 前，按仓库流程 push 分支、开 PR、等 ci/review；
    本子代理未执行这些远程操作。
-4. 若要发布，建议在 release notes 中明确：实验开关全部默认关；defer 在
-   0.2.2-rc.1 对真实打开不生效；页缓存与最终报告的证据边界。
+4. 若要发布，建议在 release notes 中明确：其余实验开关默认关，defer 默认开启；
+   defer 在 0.2.2-rc.1 对真实打开不生效（可用 `=0` 关闭）；页缓存与最终报告的
+   证据边界。
 
 **是否建议进入发布：是，有条件。** 条件是上述 1–2 完成且 PR/CI/review 通过；
-本阶段没有发现阻塞发布的正确性缺陷或性能回归，但也没有足够证据支持开启任何
-实验优化。
+本阶段没有发现阻塞发布的正确性缺陷或性能回归；除已决定默认开启的 defer 外，
+也没有足够证据支持开启其他实验优化。
 
 ## 9. 复现与证据位置
 

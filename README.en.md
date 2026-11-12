@@ -116,7 +116,7 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | Strip replay `data.stream` from the first frame. |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | Persist the opening page. |
 | `DSH_FASTLOAD_IDLE_CACHE_REFRESH` | `0` | Warm the page cache during idle windows with a read-only follow (`activate: false`); never writes the session store or original logs, and checks the `revision` before and after building. |
-| `DSH_FASTLOAD_DEFER_LIVE_BUILD` | `0` | After a page-cache hit, delay the real follow by at most 16 ms so the cached first frame can paint first; off by default. Measured without observable contention (see `docs/design.md`). |
+| `DSH_FASTLOAD_DEFER_LIVE_BUILD` | `1` | After a page-cache hit, delay the real follow by at most 16 ms so the cached first frame can paint first; on by default. A real click in 0.2.2-rc.1 opens with `activate=true`, so the click path does not actually defer; only passive requests with `activate:false` (prewarm/restore) are affected. Set `0` to disable (see `docs/design.md`). |
 | `DSH_FASTLOAD_REWIND_AWARE` | `1` | Prepend one page when rewinds hide the whole initial page. |
 | `DSH_FASTLOAD_SERVE_LOG` | `1` | Write `serve.log` in the cache directory (one line per follow, 512 KiB rotation). |
 | `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | Total cache budget (96 MiB; minimum 1 MiB). |
@@ -124,14 +124,15 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_CACHE_DIR` | empty | Cache directory; empty means `$DSH_HOME/cache/dsh-fastload`. |
 | `DSH_FASTLOAD_DEBUG` | `0` | Log each trim through the DSH logger. |
 
-`DSH_FASTLOAD_DEFER_LIVE_BUILD=1` applies only when the cache really hits, the request is an
-initial page (no `beforeSeq`/`throughSeq`), `activate !== true`, `assistantStream` has no active
-attempt, and the Agent is known to be idle. A new request for the same session, an abort or the
-Agent turning busy cancels a delay that has not run yet; an error while delaying falls back to the
-original ordering. With the switch off, ordering, bytes and logs are identical to a build without
-it. The stage 5 A/B measurement found no measurable contention between the real follow and the
-first-frame paint, so enabling it is not recommended; it stays available to re-check if client
-timing changes.
+Deferral is on by default and applies only when the cache really hits, the request is an initial
+page (no `beforeSeq`/`throughSeq`), `activate !== true`, `assistantStream` has no active attempt,
+and the Agent is known to be idle. A new request for the same session, an abort or the Agent
+turning busy cancels a delay that has not run yet; an error while delaying falls back to the
+original ordering. A user click in 0.2.2-rc.1 opens with `activate=true`, so the click path never
+defers; only passive requests such as prewarm or restore are affected, for at most 16 ms. The
+stage 5 A/B measurement found no measurable contention between the real follow and the first-frame
+paint; the default stays on as a conservative ordering to re-check when client timing changes, and
+`DSH_FASTLOAD_DEFER_LIVE_BUILD=0` restores the stage-3 ordering, bytes and logs.
 
 The web half has three switches that are not environment variables; the first
 two have opposite polarities:
@@ -161,9 +162,9 @@ two have opposite polarities:
 - Page-cache files and `serve.log` stay under `$DSH_HOME/cache/dsh-fastload` (or
   `DSH_FASTLOAD_CACHE_DIR`). Stock never reads them and they can be deleted at any time. The
   plugin never modifies session logs, the session selection or the real Session Store.
-- Every experimental switch (idle refresh, deferred live build, startup prewarm, diagnostics)
-  is off by default; invalid environment values fall back to defaults. Disabling the plugin
-  needs no data migration.
+- The idle-refresh, startup-prewarm and diagnostics switches are off by default; deferred
+  live build is on by default but never delays an activating click. Invalid environment values
+  fall back to defaults. Disabling the plugin needs no data migration.
 - Private-API and unknown-version fallbacks are listed in `AGENTS.md` ("Private APIs and
   capability detection"); the full integration evidence is in
   `docs/research/plugin-optimization-final-report.md`.

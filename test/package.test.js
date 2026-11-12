@@ -232,22 +232,26 @@ test('the deferred live build switch is documented in both READMEs', async () =>
   assert.ok(zhRow, 'Chinese README documents DSH_FASTLOAD_DEFER_LIVE_BUILD');
   assert.ok(enRow, 'English README documents DSH_FASTLOAD_DEFER_LIVE_BUILD');
   assert.match(zhRow, /16 ms/);
-  assert.match(zhRow, /默认关闭/);
+  assert.match(zhRow, /默认开启/);
+  assert.match(zhRow, /0\.2\.2-rc\.1/);
+  assert.match(zhRow, /activate=true/);
   assert.match(zhRow, /docs\/design\.md/);
   assert.match(enRow, /16 ms/);
-  assert.match(enRow, /off by default/i);
+  assert.match(enRow, /on by default/i);
+  assert.match(enRow, /0\.2\.2-rc\.1/);
+  assert.match(enRow, /activate=true/);
   assert.match(enRow, /docs\/design\.md/);
 });
 
-test('config defaults the deferred live build to off and parses the switch', async () => {
+test('config defaults the deferred live build to on and parses the switch', async () => {
   const { DEFAULTS, readConfig } = await import('../src/config.js');
-  assert.equal(DEFAULTS.deferLiveBuild, false);
-  assert.equal(readConfig({}).deferLiveBuild, false);
+  assert.equal(DEFAULTS.deferLiveBuild, true);
+  assert.equal(readConfig({}).deferLiveBuild, true);
   assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: '1' }).deferLiveBuild, true);
   assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: 'on' }).deferLiveBuild, true);
   assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: '0' }).deferLiveBuild, false);
   assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: 'off' }).deferLiveBuild, false);
   assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: 'no' }).deferLiveBuild, false);
-  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: '' }).deferLiveBuild, false);
+  assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: '' }).deferLiveBuild, true);
   assert.equal(readConfig({ DSH_FASTLOAD_DEFER_LIVE_BUILD: 'nonsense' }).deferLiveBuild, true);
 });

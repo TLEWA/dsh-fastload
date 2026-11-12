@@ -713,7 +713,38 @@ async function warmOnePage(dir, persistence, env) {
   });
 }
 
-test('keeps deferred live build off by default and serves the cache unchanged', async () => {
+test('honors DSH_FASTLOAD_DEFER_LIVE_BUILD=0 and serves the cache unchanged', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  const env = {
+    DSH_FASTLOAD_ENABLED: '1',
+    DSH_FASTLOAD_MAX_BYTES: '0',
+    DSH_FASTLOAD_PAGE_CACHE: '1',
+    DSH_FASTLOAD_CACHE_DIR: dir,
+    DSH_FASTLOAD_DEFER_LIVE_BUILD: '0',
+  };
+  try {
+    await warmOnePage(dir, persistence, env);
+    await withEnv(env, async () => {
+      const t = makeContext({ services: { sessionPersistence: persistence } });
+      t.sc.follow = async function* () {
+        yield cachedPage();
+      };
+      apply(t.ctx);
+      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild, null);
+      const stream = t.sc.follow({ maxMessages: 500, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
+      const first = await stream.next();
+      assert.equal(first.value.type, 'snapshot');
+      const end = await stream.next();
+      assert.equal(end.done, true);
+      t.dispose();
+    });
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('enables deferred live build by default without guessing the Agent state', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-defer-'));
   const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
   const env = {
@@ -730,12 +761,16 @@ test('keeps deferred live build off by default and serves the cache unchanged', 
         yield cachedPage();
       };
       apply(t.ctx);
-      assert.equal(globalThis.__DSH_FASTLOAD__.deferLiveBuild, null);
+      const report = globalThis.__DSH_FASTLOAD__.deferLiveBuild;
+      assert.ok(report, 'the deferred live build is installed by default');
+      assert.equal(report.enabled, true);
       const stream = t.sc.follow({ maxMessages: 500, activate: false, address: { kind: 'session', sessionId: 'session-test' } });
       const first = await stream.next();
       assert.equal(first.value.type, 'snapshot');
-      const end = await stream.next();
-      assert.equal(end.done, true);
+      assert.equal((await stream.next()).done, true);
+      // No agents service means the status is unknown, so the cache is served
+      // with the stock ordering instead of being delayed.
+      assert.equal(report.deferrals, 0);
       t.dispose();
     });
   } finally {
