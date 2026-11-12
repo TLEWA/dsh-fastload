@@ -26,9 +26,14 @@ function snapshot(turnCount = 4, textSize = 4000) {
   return { type: 'snapshot', records, hasMore: true };
 }
 
+// The variant a real client open resolves to after the wrapper normalises it.
+const CANONICAL_VARIANT = JSON.stringify([100, 40, 2, true, 0, 8 * 1024 * 1024, 2, true]);
+
 function makeContext(options = {}) {
   const calls = [];
   const disposers = [];
+  const listeners = new Map();
+  const registrations = [];
   const follow = async function* (request) {
     calls.push(request);
     yield snapshot();
@@ -45,16 +50,44 @@ function makeContext(options = {}) {
       disposers.push(dispose);
       return dispose;
     },
+    on(name, listener, listenOptions) {
+      if (options.onThrows) throw new Error(options.onThrows);
+      const entry = { name, listener, options: listenOptions };
+      registrations.push(entry);
+      if (!listeners.has(name)) listeners.set(name, new Set());
+      listeners.get(name).add(entry);
+      return () => {
+        listeners.get(name)?.delete(entry);
+        const index = registrations.indexOf(entry);
+        if (index >= 0) registrations.splice(index, 1);
+      };
+    },
     logger: { info() {} },
   };
   return {
     ctx,
     sc,
     calls,
+    registrations,
+    emit(name, ...args) {
+      for (const entry of [...(listeners.get(name) || [])]) entry.listener(...args);
+    },
+    listenerCount(name) {
+      return listeners.get(name)?.size || 0;
+    },
     dispose() {
       for (const dispose of disposers.splice(0).reverse()) dispose();
     },
   };
+}
+
+async function waitFor(predicate, timeoutMs = 3000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.ok(predicate(), 'condition not met within ' + timeoutMs + 'ms');
 }
 
 async function withEnv(values, fn) {
@@ -446,6 +479,163 @@ test('replays events appended after the cached cursor', async () => {
       assert.equal(replay.value.event.seq, 3);
       second.dispose();
     });
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('keeps idle refresh off by default and registers no listeners', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '0',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({ services: { sessionPersistence: persistence } });
+        apply(t.ctx);
+        assert.equal(t.listenerCount('session/event'), 0);
+        assert.equal(t.listenerCount('agent/status'), 0);
+        assert.equal(t.listenerCount('session/disposed'), 0);
+        assert.equal(globalThis.__DSH_FASTLOAD__.idleRefresh, null);
+        t.dispose();
+      }
+    );
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('idle refresh warms the canonical page and never activates the Agent', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-idle' }), open: async () => ({}) };
+  const page = {
+    type: 'snapshot',
+    cursor: 3,
+    hasMore: true,
+    assistantStream: { revision: 0 },
+    records: [
+      rec(1, 'turn/start'),
+      rec(2, 'user/message', { message: { content: 'q' } }),
+      rec(3, 'assistant/message', { message: { content: 'a' } }),
+    ],
+  };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({ services: { sessionPersistence: persistence } });
+        t.sc.follow = async function* (request) {
+          this.calls.push(request);
+          yield page;
+        };
+        apply(t.ctx, {
+          refresh: {
+            timings: { idleMs: 5, settleMs: 0, minGapMs: 0, busyRetryMs: 5, buildTimeoutMs: 5000 },
+            probeLoad: async () => 0,
+          },
+        });
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.equal(state.idleRefresh && state.idleRefresh.active, true);
+        assert.equal(t.listenerCount('session/event'), 1);
+        assert.equal(t.listenerCount('agent/status'), 1);
+        assert.equal(t.listenerCount('session/disposed'), 1);
+        assert.equal(t.registrations.every((entry) => entry.options && entry.options.global === true), true);
+
+        const hitsBefore = state.pageCacheHits;
+        t.emit('session/event', { id: 'session-idle' });
+        await waitFor(() => state.pageCache && state.pageCache.stats.writes >= 1);
+        await state.pageCache.flush();
+
+        const probe = await state.pageCache.lookup('session-idle', CANONICAL_VARIANT);
+        assert.equal(probe.hit, true);
+        assert.deepEqual(probe.opening.records, page.records);
+        assert.equal(state.pageCacheHits, hitsBefore, 'a refresh is not a client hit');
+        assert.equal(state.idleRefresh.stored >= 1, true);
+
+        const refreshCall = t.calls[t.calls.length - 1];
+        assert.equal(refreshCall.activate, false, 'a refresh must never activate an Agent');
+        assert.deepEqual(refreshCall.address, { kind: 'session', sessionId: 'session-idle' });
+        assert.equal(refreshCall.assistantStream, true);
+        assert.equal(refreshCall.maxMessages, 100);
+
+        t.dispose();
+        assert.equal(t.listenerCount('session/event'), 0);
+        assert.equal(t.listenerCount('agent/status'), 0);
+        assert.equal(t.listenerCount('session/disposed'), 0);
+        assert.equal(state.installed, false);
+        assert.equal(t.sc.__dshFastload, undefined);
+      }
+    );
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('leaves follow working when the Host cannot register event listeners', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({ services: { sessionPersistence: persistence }, onThrows: 'no event bus' });
+        apply(t.ctx);
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.equal(state.idleRefresh.active, false);
+        assert.match(state.idleRefresh.disabledReason, /no event bus/);
+        assert.equal(t.listenerCount('session/event'), 0);
+
+        const stream = t.sc.follow({ maxMessages: 500, address: { kind: 'session', sessionId: 's-1' } });
+        const first = await stream.next();
+        assert.equal(first.value.type, 'snapshot');
+        assert.equal(t.calls.length, 1);
+        t.dispose();
+      }
+    );
+  } finally {
+    await fsp.rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('re-applying with idle refresh keeps a single refresher', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-'));
+  const persistence = { stat: async () => ({ revision: 'rev-1' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_IDLE_CACHE_REFRESH: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const t = makeContext({ services: { sessionPersistence: persistence } });
+        apply(t.ctx);
+        assert.equal(t.listenerCount('session/event'), 1);
+        const report = globalThis.__DSH_FASTLOAD__.idleRefresh;
+        apply(t.ctx);
+        assert.equal(t.listenerCount('session/event'), 1);
+        assert.equal(globalThis.__DSH_FASTLOAD__.idleRefresh, report);
+        t.dispose();
+        assert.equal(t.listenerCount('session/event'), 0);
+      }
+    );
   } finally {
     await fsp.rm(dir, { recursive: true, force: true });
   }

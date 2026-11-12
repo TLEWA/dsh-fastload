@@ -32,6 +32,12 @@
   `maxBytes * 0.97`，受保护 turn 超过软预算但不超过 `hardCapBytes` 时保留，超过硬上限则整页不动。
 - 裁剪后必须设置 `hasMore: true`；不要删除历史，只缩小首屏。
 - 包装必须幂等：`__dshFastload` 防重复；插件禁用时 `follow` 完全不变。
+- 空闲预热（`DSH_FASTLOAD_IDLE_CACHE_REFRESH`，默认关闭）只能用只读
+  `follow({ activate: false })`：不激活 Agent、不写 session store、不改原始日志；刷新请求
+  必须带内部标记，绕开页缓存读取且不计命中；真实收益未测量时不得写进文档当作事实。
+- 预热构建前后都要校验 `sessionPersistence.stat` 的 revision 与缓存 key，不一致就丢弃，
+  不得把旧页写到新 revision；同一 session 去重、全局并发 1，Agent 运行或 Host 事件循环
+  延迟时推迟；卸载/禁用时必须清 timer、监听并 abort 在飞构建。
 - 配置非法值必须回退到默认值；`maxBytes` 大于 0 时有 64 KiB 下限。
 
 ### 客户端不变量

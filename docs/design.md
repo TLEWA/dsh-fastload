@@ -67,19 +67,53 @@ task, and restored the 42fe page to 780 anchors, 14,504 DOM nodes and
 already scrolls (3,622 px), so the client skips it and keeps the 268-anchor
 first page.
 
+## Idle page-cache refresh
+
+A session that just went quiet is the best moment to build its opening page: the
+page cache is keyed by the persistence revision, so a page built after the last
+write can serve the next open, while a page built too early is simply a miss.
+The host half (off by default, `DSH_FASTLOAD_IDLE_CACHE_REFRESH=1`) watches two
+signals only: `session/event` for activity and `agent/status` for turn
+bookkeeping. The interactive Host exposes no durable "turn written" notification
+— the JSONL writer batches live events for up to 200 ms — so the refresher
+debounces activity by `idleMs` (4 s default) and, once queued, waits `settleMs`
+(600 ms) after the cache probe before reading the revision.
+
+It then runs the same `follow({ activate: false })` a client open would use,
+through the plugin's own wrapper, with the canonical page variant. Two
+`sessionPersistence.stat` revision reads bracket the build; the page is stored
+only when the revision is unchanged before and after the build, and it is stored
+under the `key` the cache lookup returned for that revision. A refresh request
+is tagged with an internal symbol, so the page-cache wrapper never serves it and
+it never counts as a cache hit. The refresher never activates the Agent, never
+writes the session store, never edits original logs, and keeps at most one build
+in flight globally; Agent activity aborts a build that is already running, and a
+Host-reported event-loop lag defers the build instead of competing with the
+interactive session.
+
+The defaults follow from the 200 ms writer batch: the first revision read has to
+land after the batch, and the second read catches appends that happened while the
+page was being built. If a read fails, the API shape is unknown, or the same
+session keeps failing, the refresher disables itself instead of guessing.
+
 ## What is intentionally absent
 
 - No DOM virtualization: that is a separate, larger change; this plugin only
   reduces the initial page and fills a short viewport once.
 - No general auto-pagination: one page per mounted transcript.
-- No cache: it does not make "load older" faster, and it does not reduce the
-  Host's full log decode.
+- No speed-up for "load older" or for a cache miss: the page cache covers only
+  the initial opening, and building a page still decodes the log. The idle refresh
+  moves that build off the open path; it does not shrink the Host's full decode.
 
 ## Test surface
 
-`npm test` covers pure planning logic. The plugin's runtime wrapper is small
-and deliberately untested by mocking the whole DSH Host; the production-shaped
-verification is the CDP benchmark documented in `docs/research/`.
+`npm test` covers the pure planning logic and the runtime wiring: the wrapper
+is exercised against a fake `sessionController` and cordis context in
+`test/plugin.test.js` (initial-page rewrite, cache replay, idle-refresh listeners
+and disposal), and the refresher against a fake cache and persistence service in
+`test/cache-refresh.test.js` (queueing, dedup, cancellation, revision checks).
+The production-shaped verification remains the CDP benchmark documented in
+`docs/research/`.
 
 ## Next steps
 
