@@ -80,6 +80,25 @@ export function planTrim(opening, options = {}) {
   if (cutIndex < 0 && suffix[protectedIndex] <= hardCapBytes) {
     cutIndex = protectedIndex;
   }
+
+  // A rewind-aware opening may have pulled one older, visible turn in front of
+  // a tail that is entirely hidden. Cutting that turn away would hand the
+  // client an empty transcript again, so keep it (and its turn prefix) even
+  // when it costs more than the soft budget; if it cannot fit the hard cap the
+  // page is left untouched, exactly like an oversized protected tail.
+  const protectSeq = Number(options.protectSeq);
+  if (cutIndex > 0 && Number.isFinite(protectSeq)) {
+    let protectIndex = -1;
+    for (const index of starts) {
+      const event = eventOf(records[index]);
+      const seq = event && typeof event.seq === 'number' ? event.seq : null;
+      if (seq !== null && seq <= protectSeq) protectIndex = index;
+    }
+    if (protectIndex > 0 && cutIndex > protectIndex) {
+      if (suffix[protectIndex] > hardCapBytes) return unchanged;
+      cutIndex = protectIndex;
+    }
+  }
   if (cutIndex <= 0) return unchanged;
 
   const cutEvent = eventOf(records[cutIndex]);

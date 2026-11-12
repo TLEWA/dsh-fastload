@@ -13,6 +13,11 @@ turn 自身超过 100 条消息时，会在该 turn 内部切。这个目标仍�
 1 个 turn 时，页面可能只有 267 px、102 个可见字符（最后一条是折叠的工具调用），
 firstAnchor 看起来很快，实际上是一个空页。
 
+从 0.4 开始，宿主端另外加了三层优化：会话头索引复用未变化文件的 zstd
+首行、首屏快照按 persistence revision 校验后落盘、首帧剥离回放用的
+`assistant/message.data.stream`。三者各有独立开关，任何异常都会静默回退到
+原始路径；日志文件本身永远不被修改。
+
 ### 行为
 
 - 首屏：`maxMessages = 100`，`turnWindow = { minMessages: 40, minTurns: 2 }`。
@@ -24,15 +29,30 @@ firstAnchor 看起来很快，实际上是一个空页。
   turn；如果这两个 turn 超过软预算但不超过硬上限，就保留它们，不切进 turn 内部。
 - 禁用、卸载或热重载插件会还原 `sessionController.follow` 并清除 `__dshFastload`
   标记；重新启用后按当前配置重新包装，不会沿用旧配置。
+- 空白自愈：Web 端发现“有页、有加载更早按钮、正文 0 行”且窗口里存在
+  `/rewind` 命令时，直接用内置“加载更早”往回补一页（保留锚点，最多 4 次、
+  间隔 ≥700ms），而不是重建视图；重建对 rewind 隐藏的内容无效。
 - 后台补齐：首帧渲染后，Web 客户端等一个短暂的输入空闲窗口；如果 transcript
   不可滚动（`scrollHeight <= clientHeight`），就自动点一次内置“加载更早”。
   这条路径走 `ChatNavigation.loadEarlier()`，会保留视口锚点，使尾部上下文与
   stock 500/50/2 一致。如果首屏本身已经可滚动，则不动作：最新内容已经在底部。
+- rewind 感知首屏：初始页里出现完整的 `/rewind` 命令对时，若该页的可见
+  消息被 rewind 插件的裁剪区间全部隐藏，就把页起点向前扩一页（只补一次），
+  让第一次派发就带可见内容。正常会话不触发，零额外开销。
+- 会话头索引：`session/list` 对未变化的会话文件直接复用上次解析出的 header，
+  并把一次启动内的重复列表请求合成一次；索引写入 1.5 秒防抖、原子替换，
+  文件大小或 mtime 变了自然失效。
+- 首屏快照缓存：初始页按“会话 revision + 页窗口 + 裁剪配置”落盘（zstd）。
+  命中时先发缓存页面，真实 `follow` 仍在后台构建，用 cursor 对齐后续事件；
+  对不齐就丢弃缓存，绝不下发第二个 snapshot。
+- replay stream 剥离：首帧里 `assistant/message.data.stream` 被替换成 `[]`
+  （不是删除键，客户端会直接迭代它）。transcript 从 `data.message` 渲染、
+  用量从 `data.usage` 读，所以可见内容不变。
 
 ### 不做什么
 
-- 不减少 Host 对完整日志的解码；它减少的是 snapshot 字节、WebSocket 传输和
-  renderer 挂载量。
+- 未命中页缓存时不减少 Host 对完整日志的解码；命中时直接读快照、跳过建页。
+  它减少的是 snapshot 字节、WebSocket 传输和 renderer 挂载量。
 - 不改 transcript 布局、Markdown 渲染或滚动模型。
 - 不删除历史；“加载更早”仍按原语义向前翻页。
 - 后台补齐每个挂载的 transcript 最多一次，且只在视口偏短时触发；不是通用的
@@ -49,6 +69,14 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | turnWindow 目标保留的尾部 turn 数；仍受 `maxMessages` 硬上限约束。 |
 | `DSH_FASTLOAD_MAX_BYTES` | `0` | 软字节预算；`0` 表示不按字节裁。 |
 | `DSH_FASTLOAD_HARD_CAP_BYTES` | `8388608` | 受保护 turn 超过该值时不再裁切。 |
+| `DSH_FASTLOAD_SCAN_CACHE` | `1` | 会话头索引与列表 TTL memo；`0` 恢复每次全量读 header。 |
+| `DSH_FASTLOAD_STRIP_STREAM` | `1` | 首帧剥离回放用的 `data.stream`。 |
+| `DSH_FASTLOAD_PAGE_CACHE` | `1` | 持久化首屏快照。 |
+| `DSH_FASTLOAD_REWIND_AWARE` | `1` | 初始页被 `/rewind` 全部隐藏时向前扩一页。 |
+| `DSH_FASTLOAD_SERVE_LOG` | `1` | 在缓存目录写 `serve.log`（每次 follow 一行，512 KiB 轮转）。 |
+| `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | 页缓存总量上限（96 MiB，下限 1 MiB）。 |
+| `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | 页缓存文件数上限。 |
+| `DSH_FASTLOAD_CACHE_DIR` | 空 | 缓存目录；空表示 `$DSH_HOME/cache/dsh-fastload`。 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条 DSH 日志。 |
 
 ### 安装
@@ -95,6 +123,22 @@ npm test
 更早的 100/40/1 结果（283.5 ms）故意**不用**作标题数据：它只渲染出 267 px、102 个可见字符的页面。完整矩阵见
 `docs/research/dsh-long-session-first-open.md` 与
 `docs/research/dsh-cdp-benchmark-results.md`，其中包括为什么字节上限只是回退方案。
+
+2026-11-12 又在 `session-0ce06eba…`（15.4 MB 日志、2 个 turn、每 turn 84 步、
+861 条事件）上做了 A/B。这个会话只有 2 个 turn，turn 窗口保护使它无法按字节
+再裁小，因此它衡量的正是“页体积 + 首帧处理”这条路：
+
+| 指标 | stock 500/50/2 | fastload 默认 |
+|---|---:|---:|
+| wire 字节 | 2,821,398 | 1,562,989（−44.6%） |
+| `follow` → snapshot | 325 / 330 ms | 247 / 260 ms |
+| 首屏行出现 | 950.8 / 1,055.6 ms | 839.5 / 951.0 ms |
+| 可见文本 | 175 行 / 56,984 字符 | 完全一致 |
+| `session/list` 构建 | 238.7 ms | 82.0 ms（有索引首调）、1.1–1.8 ms（TTL 命中） |
+| 缓存页读取 | — | 16.9–17.7 ms（冷建页 583.5 ms） |
+
+逐项评估、未实施项的原因和上游改造方案见
+`docs/research/dsh-first-open-p1-p8-assessment.md`。
 
 ## 我的其他 DSH 项目
 

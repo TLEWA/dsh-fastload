@@ -16,6 +16,13 @@ turn. It still matters: a one-turn page can look fast while the viewport only
 contains a collapsed tool call (measured: 267 px, 102 characters of visible
 text). Two turns normally keep the previous turn's readable context in view.
 
+Since 0.4 the host half also carries three optimizations: a session-header index
+that reuses the already-decoded zstd first line for files that did not change, a
+persisted opening page validated against the persistence revision, and stripping
+of the replay-only `assistant/message.data.stream` from the first frame. Each
+has its own switch and falls back silently to the original path on any error;
+the log files themselves are never modified.
+
 ### What it changes
 
 - Initial page: `maxMessages = 100`, `turnWindow = { minMessages: 40, minTurns: 2 }`.
@@ -27,16 +34,38 @@ text). Two turns normally keep the previous turn's readable context in view.
 - Optional `maxBytes` trims only at `turn/start` boundaries. It always keeps
   the newest `minTurns` complete turns; if those protected turns exceed the
   soft budget but fit the hard cap, they are kept instead of cutting into a turn.
+- Blank self-heal: when the web client sees a page, a "Load older" button and
+  zero rows while the window contains `/rewind` commands, it pages backwards
+  with the built-in button (anchor preserved, at most 4 times, ≥700 ms apart)
+  instead of rebuilding the view; a rebuild cannot un-hide rewound content.
 - Background fill: after the first paint, the web client waits for a short idle
   window. If the transcript does not scroll (`scrollHeight <= clientHeight`),
   it presses the built-in "Load older" button once. That runs
   `ChatNavigation.loadEarlier()`, so the viewport anchor is preserved and the
   tail context becomes the same as stock 500/50/2. If the first page already
   scrolls, it does nothing: the newest content is already at the bottom.
+- Rewind-aware first page: when the initial page contains a complete `/rewind`
+  pair and every message in it is hidden by the rewind plugin's cut ranges, one
+  more page is prepended (at most once) so the very first dispatch already
+  carries visible content. Sessions without rewinds pay nothing.
+- Header index: `session/list` reuses the previously decoded header for session
+  files whose size and mtime did not change, and coalesces repeated list requests
+  within one boot. The index is written with a 1.5 s debounce and an atomic
+  replace; a changed file simply misses.
+- Opening-page cache: an initial page is stored (zstd) under "session revision +
+  page window + trim config". On a hit the cached page is sent first while the
+  real `follow` still builds in the background; events after the cached cursor
+  are forwarded. If the cursors disagree the cache is dropped and a second
+  snapshot is never emitted.
+- Replay-stream strip: `assistant/message.data.stream` becomes `[]` in the
+  first frame (not deleted, because clients iterate it). Transcripts render from
+  `data.message` and usage comes from `data.usage`, so visible content is
+  unchanged.
 
 ### What it does not do
 
-- It does not reduce the Host's full log decode. It reduces snapshot bytes,
+- On a page-cache miss it does not reduce the Host's full log decode; on a hit
+  it reads the snapshot and skips the page build. It reduces snapshot bytes,
   WebSocket transfer and renderer mount work.
 - It does not change the transcript layout, Markdown rendering or scroll model.
 - It does not delete history: "load older" still pages backwards with the
@@ -55,6 +84,14 @@ text). Two turns normally keep the previous turn's readable context in view.
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | Target complete turns at the tail; `maxMessages` still caps the page. |
 | `DSH_FASTLOAD_MAX_BYTES` | `0` | Soft byte budget; `0` disables byte trimming. |
 | `DSH_FASTLOAD_HARD_CAP_BYTES` | `8388608` | Never trim below the protected turns if they exceed this. |
+| `DSH_FASTLOAD_SCAN_CACHE` | `1` | Session-header index and list TTL memo; `0` re-reads every header. |
+| `DSH_FASTLOAD_STRIP_STREAM` | `1` | Strip replay `data.stream` from the first frame. |
+| `DSH_FASTLOAD_PAGE_CACHE` | `1` | Persist the opening page. |
+| `DSH_FASTLOAD_REWIND_AWARE` | `1` | Prepend one page when rewinds hide the whole initial page. |
+| `DSH_FASTLOAD_SERVE_LOG` | `1` | Write `serve.log` in the cache directory (one line per follow, 512 KiB rotation). |
+| `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | Total cache budget (96 MiB; minimum 1 MiB). |
+| `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | Maximum cached page files. |
+| `DSH_FASTLOAD_CACHE_DIR` | empty | Cache directory; empty means `$DSH_HOME/cache/dsh-fastload`. |
 | `DSH_FASTLOAD_DEBUG` | `0` | Log each trim through the DSH logger. |
 
 ### Install
@@ -110,6 +147,23 @@ headline: it rendered a 267 px page with only 102 visible characters. See
 `docs/research/dsh-long-session-first-open.md` and
 `docs/research/dsh-cdp-benchmark-results.md` for the full matrix, including
 why a byte cap is only a fallback.
+
+A second A/B on 2026-11-12 used `session-0ce06eba…` (15.4 MB log, 2 turns,
+84 steps per turn, 861 events). Its two turns are protected by the turn window,
+so it cannot shrink by byte trimming; it measures the "page size + first-frame
+handling" path instead:
+
+| Metric | stock 500/50/2 | fastload defaults |
+|---|---:|---:|
+| wire bytes | 2,821,398 | 1,562,989 (−44.6%) |
+| `follow` → snapshot | 325 / 330 ms | 247 / 260 ms |
+| first transcript rows | 950.8 / 1,055.6 ms | 839.5 / 951.0 ms |
+| visible text | 175 rows / 56,984 chars | identical |
+| `session/list` build | 238.7 ms | 82.0 ms (first, indexed), 1.1–1.8 ms (TTL hit) |
+| cached page read | — | 16.9–17.7 ms (cold build 583.5 ms) |
+
+Per-item assessment, reasons for the items not implemented and the upstream
+proposals are in `docs/research/dsh-first-open-p1-p8-assessment.md`.
 
 ## Other DSH projects I work on
 
