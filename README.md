@@ -79,12 +79,20 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | 首帧剥离回放用的 `data.stream`。 |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | 持久化首屏快照。 |
 | `DSH_FASTLOAD_IDLE_CACHE_REFRESH` | `0` | 空闲时用只读 follow（`activate: false`）预热页缓存；不写 session store、不改原始日志，构建前后校验 `revision`。 |
+| `DSH_FASTLOAD_DEFER_LIVE_BUILD` | `0` | 页缓存命中后把真实 follow 延后最多 16 ms，让缓存首帧先绘制；默认关闭，实测未发现可测竞争（见 `docs/design.md`）。 |
 | `DSH_FASTLOAD_REWIND_AWARE` | `1` | 初始页被 `/rewind` 全部隐藏时向前扩一页。 |
 | `DSH_FASTLOAD_SERVE_LOG` | `1` | 在缓存目录写 `serve.log`（每次 follow 一行，512 KiB 轮转）。 |
 | `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | 页缓存总量上限（96 MiB，下限 1 MiB）。 |
 | `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | 页缓存文件数上限。 |
 | `DSH_FASTLOAD_CACHE_DIR` | 空 | 缓存目录；空表示 `$DSH_HOME/cache/dsh-fastload`。 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条 DSH 日志。 |
+
+`DSH_FASTLOAD_DEFER_LIVE_BUILD=1` 只在缓存确实命中、请求为初始页（无 `beforeSeq`/
+`throughSeq`）、`activate !== true`、`assistantStream` 没有进行中的 attempt，且能确认 Agent
+空闲时生效。同 session 新请求、abort 或 Agent 转忙都会取消尚未执行的延后；延后期间出错
+回退到原时序。默认关闭时时序、字节和日志与未加该开关时一致。阶段 5 的 A/B 实测未发现
+真实 follow 与首帧绘制之间的可测竞争，因此不建议开启，保留开关只为将来客户端时序变化时
+可复验。
 
 Web 端还有一个不进环境变量的开关：`localStorage['dsh-fastload.prewarm'] = '0'`
 （或 `window.__DSH_FASTLOAD_PREWARM__ = false`）关闭会话预测性预加载，默认开启。

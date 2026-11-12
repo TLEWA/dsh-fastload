@@ -21,6 +21,7 @@ import { planCompact } from './src/compact.js';
 import { installScanCache } from './src/scan-cache.js';
 import { createPageCache } from './src/page-cache.js';
 import { createCacheRefresh } from './src/cache-refresh.js';
+import { createLiveBuildDefer, DEFER_DEFAULTS } from './src/defer-live-build.js';
 import { createServeLog } from './src/serve-log.js';
 import { findRewindCuts, earliestCut, firstSeqOf, hiddenByCuts } from './src/rewind.js';
 
@@ -94,6 +95,91 @@ function observeFirstFrame(result, startedAt) {
 }
 
 /**
+ * Debug-only event-loop probe. The gap between two consecutive setImmediate
+ * turns is `0.1ms`-ish on an idle loop and grows by exactly the synchronous
+ * work it had to wait for, so "max gap minus the smallest observed gap" is the
+ * stall the loop could not avoid. Only used when timing is on.
+ */
+function createLagProbe() {
+  let last = performance.now();
+  let max = 0;
+  let min = Infinity;
+  let slices = 0;
+  let stopped = false;
+  const tick = () => {
+    if (stopped) return;
+    const at = performance.now();
+    const gap = at - last;
+    last = at;
+    if (slices > 0) {
+      if (gap > max) max = gap;
+      if (gap < min) min = gap;
+    }
+    slices += 1;
+    setImmediate(tick);
+  };
+  setImmediate(tick);
+  return {
+    stop() {
+      stopped = true;
+      return {
+        maxMs: max,
+        minMs: min === Infinity ? 0 : min,
+        slices,
+        stallMs: max === 0 ? 0 : Math.max(0, max - (min === Infinity ? 0 : min)),
+      };
+    },
+  };
+}
+
+/**
+ * Positive evidence that a Session is quiet, or 'unknown'.
+ *
+ * A deferral is only allowed on 'idle'. A missing Agent service, a thrown
+ * lookup or an unrecognised status all report 'unknown', which keeps the
+ * original timing: "there is a cache hit" is not evidence that no Agent is
+ * about to write to the same Session.
+ */
+function agentStatusReader(ctx, c) {
+  const find = () => {
+    try {
+      if (typeof c.get === 'function') {
+        const service = c.get('agents');
+        if (service && typeof service.get === 'function') return service;
+      }
+    } catch {}
+    for (const holder of [ctx, c]) {
+      try {
+        const service = holder && holder.agents;
+        if (service && typeof service.get === 'function') return service;
+      } catch {}
+    }
+    return null;
+  };
+  const service = find();
+  if (!service) return () => 'unknown';
+  return (sessionId) => {
+    let agent;
+    try {
+      agent = service.get(sessionId);
+    } catch {
+      return 'unknown';
+    }
+    // No Agent instance exists for this Session, so nothing is running for it.
+    if (agent === undefined || agent === null) return 'idle';
+    let status;
+    try {
+      status = agent.status;
+    } catch {
+      return 'unknown';
+    }
+    if (status === 'running') return 'running';
+    if (status === 'idle') return 'idle';
+    return 'unknown';
+  };
+}
+
+/**
  * Serve a stored opening page before the live history build finishes.
  *
  * The live `follow` stream is still started immediately, so activation and the
@@ -103,15 +189,29 @@ function observeFirstFrame(result, startedAt) {
  * ends the stream rather than emitting a second opening frame.
  */
 function wrapPageCache(result, options) {
-  const { cache, sessionId, variant, config, state, log } = options;
+  const { cache, sessionId, variant, config, state, log, defer, signal, request } = options;
   if (!result || typeof result[Symbol.asyncIterator] !== 'function') return result;
 
   return (async function* () {
+    // Timing is debug-only: one boolean check and no clock reads when
+    // DSH_FASTLOAD_DEBUG is off, so the default path keeps its exact cost.
+    const timed = config.debug === true;
+    const epoch = timed ? Date.now() : 0;
+    const timeStart = timed ? performance.now() : 0;
+    const timings = timed
+      ? { lookupMs: 0, sendMs: 0, resumeMs: 0, deferMs: 0, liveMs: 0, stallMs: 0, lagSlices: 0, wallSend: 0, wallBuild: 0 }
+      : null;
+    const ms = (value) => (Number.isFinite(value) ? value.toFixed(1) : '0.0');
+    // Started before the cache lookup so the probe has ticks to compare by the
+    // time the live build runs: a build that blocks the Host loop shows up as
+    // one wide gap. Debug-only; stopped in `finally` if the stream ends early.
+    const lag = timings ? createLagProbe() : null;
     const pullAt = process.hrtime.bigint();
     let probe = { hit: false };
     try {
       probe = await cache.lookup(sessionId, variant);
     } catch {}
+    if (timings) timings.lookupMs = performance.now() - timeStart;
 
     const cached = probe && probe.hit ? probe.opening : null;
     const cachedCursor = cached && Number.isFinite(cached.cursor) ? cached.cursor : null;
@@ -132,13 +232,36 @@ function wrapPageCache(result, options) {
       if (config.debug) {
         process.stderr.write('[fl] page cache served cursor=' + cachedCursor + ' records=' + (Array.isArray(cached.records) ? cached.records.length : -1) + '\n');
       }
+      if (timings) timings.sendMs = performance.now() - timeStart;
       yield cached;
     }
+    // Consumer came back for the next frame: everything up to here was the
+    // cache read plus handing the bytes to the transport.
+    if (timings) {
+      timings.resumeMs = performance.now() - timeStart;
+      timings.wallSend = epoch + timings.sendMs;
+    }
 
-    // Give the transport a turn to flush the cached page before the live
-    // history build starts competing for the same thread.
-    if (served) await new Promise((resolve) => setImmediate(resolve));
+    // Stage 5 (opt-in): a bounded, cancellable yield between the cached page
+    // and the live build. Off by default; a refused gate or any error leaves
+    // the stage-3 single setImmediate below untouched.
+    let deferral = null;
+    if (served && defer) {
+      try {
+        deferral = await defer.wait({ sessionId, request, cached, signal });
+      } catch {
+        deferral = null;
+      }
+    }
+    if (timings && deferral) timings.deferMs = Number(deferral.waitedMs) || 0;
 
+    if (served && !(deferral && deferral.deferred)) {
+      // Give the transport a turn to flush the cached page before the live
+      // history build starts competing for the same thread.
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
+    if (timings) timings.wallBuild = epoch + (performance.now() - timeStart);
     let first = true;
     const iterator = result[Symbol.asyncIterator]();
     try {
@@ -149,6 +272,38 @@ function wrapPageCache(result, options) {
 
         if (first) {
           first = false;
+          if (timings) {
+            const now = performance.now();
+            timings.liveMs = now - timeStart;
+            const stats = lag.stop();
+            timings.stallMs = stats.stallMs;
+            timings.lagSlices = stats.slices;
+            const line =
+              'timing sid=' + sessionId + ' lookup=' + ms(timings.lookupMs) +
+                ' send=' + ms(timings.sendMs) + ' resume=' + ms(timings.resumeMs) +
+                ' defer=' + ms(timings.deferMs) + ' live=' + ms(timings.liveMs) +
+                ' stall=' + ms(timings.stallMs) + ' lagSlices=' + timings.lagSlices +
+                ' total=' + ms(now - timeStart) +
+                ' wallSend=' + Math.round(timings.wallSend) +
+                ' wallBuild=' + Math.round(timings.wallBuild) +
+                ' deferReason=' + (deferral ? deferral.reason : 'off');
+            log?.write(line);
+            if (config.debug) process.stderr.write('[fl] ' + line + '\n');
+            state.pageCacheTiming = {
+              sid: sessionId,
+              lookupMs: timings.lookupMs,
+              sendMs: timings.sendMs,
+              resumeMs: timings.resumeMs,
+              deferMs: timings.deferMs,
+              liveMs: timings.liveMs,
+              stallMs: timings.stallMs,
+              lagSlices: timings.lagSlices,
+              totalMs: now - timeStart,
+              wallSend: Math.round(timings.wallSend),
+              wallBuild: Math.round(timings.wallBuild),
+              deferReason: deferral ? deferral.reason : 'off',
+            };
+          }
           if (frame && frame.type === 'snapshot') {
             log?.write(
               'live sid=' + sessionId + ' records=' +
@@ -216,6 +371,7 @@ function wrapPageCache(result, options) {
         yield frame;
       }
     } finally {
+      if (lag) lag.stop();
       try {
         await iterator.return?.();
       } catch {}
@@ -431,6 +587,7 @@ export function apply(ctx, options) {
   const refreshOptions = options && options.refresh ? options.refresh : null;
   const state = reuseState();
   if (state.installed !== true) state.idleRefresh = null;
+  if (state.installed !== true) state.deferLiveBuild = null;
   state.config = config;
   state.installed = false;
   state.error = null;
@@ -445,7 +602,10 @@ export function apply(ctx, options) {
     ', page cache=' + (config.pageCache ? 'on' : 'off') +
     ', rewind=' + (config.rewindAware ? 'aware' : 'plain') +
     ', replay streams=' + (config.stripStream ? 'stripped' : 'kept') +
-    ', idle refresh=' + (config.idleCacheRefresh ? 'on' : 'off');
+    ', idle refresh=' + (config.idleCacheRefresh ? 'on' : 'off') +
+    // Only mentioned when opted in, so the default banner is byte-identical
+    // to the stage-3 branch.
+    (config.deferLiveBuild ? ', deferred live build=on' : '');
   try {
     ctx.logger?.info?.(banner);
   } catch {}
@@ -553,12 +713,38 @@ export function apply(ctx, options) {
       // wrapper into a passthrough instead of leaving the old page size in the
       // chain and re-applying it after the next install.
       let active = true;
+      // Stage 5: opt-in, cancellable yield before the live build. Constructed
+      // per installation so its pending timers die with the wrapper.
+      let liveBuildDefer = null;
+      if (config.deferLiveBuild) {
+        const deferOptions = options && options.defer ? options.defer : null;
+        liveBuildDefer = createLiveBuildDefer({
+          budgetMs: deferOptions && Number.isFinite(deferOptions.budgetMs)
+            ? deferOptions.budgetMs
+            : DEFER_DEFAULTS.budgetMs,
+          maxSlices: deferOptions && Number.isInteger(deferOptions.maxSlices)
+            ? deferOptions.maxSlices
+            : undefined,
+          timers: deferOptions ? deferOptions.timers : undefined,
+          now: deferOptions ? deferOptions.now : undefined,
+          statusOf: deferOptions && typeof deferOptions.statusOf === 'function'
+            ? deferOptions.statusOf
+            : agentStatusReader(ctx, c),
+          log: serveLog,
+        });
+        state.deferLiveBuild = liveBuildDefer.report();
+      }
       const wrapped = function follow(request, signal) {
         if (!active) return original.call(this, request, signal);
         const refreshing = request != null && request[REFRESH_REQUEST] === true;
         const next = { ...request };
         if (refreshing) delete next[REFRESH_REQUEST];
         const initial = isInitialPage(next, config);
+        // A newer follow for the same Session owns the live stream: drop any
+        // yield that has not started its build yet instead of letting a stale
+        // timer delay this request. Internal refresh builds do not count.
+        const requestSessionId = sessionIdOf(next);
+        if (liveBuildDefer && !refreshing && requestSessionId) liveBuildDefer.arrive(requestSessionId);
 
         if (initial) {
           next.maxMessages = config.maxMessages;
@@ -581,7 +767,7 @@ export function apply(ctx, options) {
           ? wrapFirstSnapshot(result, config, state, ctx, extension)
           : result;
         const streamed = config.debug ? observeFirstFrame(trimmed, startedAt) : trimmed;
-        const sessionId = initial ? sessionIdOf(next) : null;
+        const sessionId = initial ? requestSessionId : null;
         if (serveLog) {
           try {
             serveLog.write(
@@ -605,6 +791,11 @@ export function apply(ctx, options) {
           config,
           state,
           log: serveLog,
+          defer: liveBuildDefer,
+          signal,
+          // The gate re-checks the request it is deferring for: an activating
+          // or paged request is never deferred.
+          request: next,
         });
       };
 
@@ -690,6 +881,9 @@ export function apply(ctx, options) {
       return () => {
         try {
           releaseRefresh();
+        } catch {}
+        try {
+          liveBuildDefer?.dispose();
         } catch {}
         if (target.follow === wrapped) {
           if (ownDescriptor) Object.defineProperty(target, 'follow', ownDescriptor);

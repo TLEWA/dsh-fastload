@@ -96,12 +96,22 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | Strip replay `data.stream` from the first frame. |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | Persist the opening page. |
 | `DSH_FASTLOAD_IDLE_CACHE_REFRESH` | `0` | Warm the page cache during idle windows with a read-only follow (`activate: false`); never writes the session store or original logs, and checks the `revision` before and after building. |
+| `DSH_FASTLOAD_DEFER_LIVE_BUILD` | `0` | After a page-cache hit, delay the real follow by at most 16 ms so the cached first frame can paint first; off by default. Measured without observable contention (see `docs/design.md`). |
 | `DSH_FASTLOAD_REWIND_AWARE` | `1` | Prepend one page when rewinds hide the whole initial page. |
 | `DSH_FASTLOAD_SERVE_LOG` | `1` | Write `serve.log` in the cache directory (one line per follow, 512 KiB rotation). |
 | `DSH_FASTLOAD_PAGE_CACHE_BYTES` | `100663296` | Total cache budget (96 MiB; minimum 1 MiB). |
 | `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | Maximum cached page files. |
 | `DSH_FASTLOAD_CACHE_DIR` | empty | Cache directory; empty means `$DSH_HOME/cache/dsh-fastload`. |
 | `DSH_FASTLOAD_DEBUG` | `0` | Log each trim through the DSH logger. |
+
+`DSH_FASTLOAD_DEFER_LIVE_BUILD=1` applies only when the cache really hits, the request is an
+initial page (no `beforeSeq`/`throughSeq`), `activate !== true`, `assistantStream` has no active
+attempt, and the Agent is known to be idle. A new request for the same session, an abort or the
+Agent turning busy cancels a delay that has not run yet; an error while delaying falls back to the
+original ordering. With the switch off, ordering, bytes and logs are identical to a build without
+it. The stage 5 A/B measurement found no measurable contention between the real follow and the
+first-frame paint, so enabling it is not recommended; it stays available to re-check if client
+timing changes.
 
 The web half has one switch that is not an environment variable:
 `localStorage['dsh-fastload.prewarm'] = '0'` (or

@@ -20,6 +20,20 @@ All notable changes are documented here. Versions follow
   never activates the Agent, writes the session store or modifies original logs.
   Enable with `DSH_FASTLOAD_IDLE_CACHE_REFRESH=1`; real first-open gains were not
   measured for this change.
+- **Deferred live build (stage 5, host half, off by default).** When the page cache
+  really hits, the request is an initial page, `activate !== true`, `assistantStream` has
+  no active attempt and the Agent is known idle, the real `follow` build starts at most
+  16 ms after the cached frame (sliced scheduling; a new request for the same session,
+  an abort or the Agent turning busy cancels a pending delay). Any failed gate or unknown
+  state keeps the original ordering, and an error while delaying falls back to the stage 3
+  single `setImmediate`. With the switch off, ordering, bytes and logs match stage 3;
+  `DSH_FASTLOAD_DEBUG=1` adds a `timing` line to `serve.log`
+  (`lookup/send/resume/defer/live/build/stall`), while the default path reads no clocks.
+  A/B measurement (a final block of 8 cache hits per arm, after an earlier 16-hit block):
+  the real build took about 4–5 ms, the live frame arrived 11–20 ms after the cached
+  frame, and the first row appeared about 170 ms after it, so no contention with the
+  first-frame paint was observed. The switch stays off by default and enabling it is not
+  recommended.
 - **Predictive prewarm (P6, web client).** Hovering or focusing a sidebar session
   row for 150 ms issues `session/follow({ activate: false })` to build the opening
   page into the page cache; a real click then hits the cache. The passive read
