@@ -114,7 +114,10 @@ function summarize(pageSummary, net, hostLog, stderrLog, { clickWall, navWall, a
   const followAt = s.followSentAt;
   const snapAt = s.targetSnapshotAt;
   const firstAt = s.firstRowAt;
-  const inWindow = net.frames.filter((f) => f.dir === 'in' && f.at >= clickWall && (firstAt == null || f.at <= clickWall + (firstAt - clickAt) + 50));
+  const firstRowWall = firstAt != null && clickAt != null ? clickWall + (firstAt - clickAt) : null;
+  const snapshotWall = net.snapshot ? net.snapshot.at : null;
+  const inWindowEnd = firstRowWall == null ? Infinity : Math.max(firstRowWall + 50, snapshotWall != null ? snapshotWall + 1 : -Infinity);
+  const inWindow = net.frames.filter((f) => f.dir === 'in' && f.at >= clickWall && f.at <= inWindowEnd);
   const outWindow = net.frames.filter((f) => f.dir === 'out' && f.at >= clickWall && (firstAt == null || f.at <= clickWall + (firstAt - clickAt) + 50));
   const snapshot = net.snapshot;
   const records = snapshot ? snapshot.records : null;

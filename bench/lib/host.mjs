@@ -24,13 +24,14 @@ export function resolveDshBin(explicit) {
 }
 
 export class DshHost {
-  constructor({ home, port, workspace, dshBin, outDir, label = 'host' }) {
+  constructor({ home, port, workspace, dshBin, outDir, label = 'host', extraEnv = {} }) {
     this.home = path.resolve(home);
     this.port = port;
     this.workspace = path.resolve(workspace);
     this.dshBin = resolveDshBin(dshBin);
     this.outDir = outDir;
     this.label = label;
+    this.extraEnv = extraEnv;
     this.pid = null;
     this.launcherPid = null;
     this.tokenUrl = null;
@@ -60,6 +61,7 @@ export class DshHost {
 
     const env = {
       ...process.env,
+      ...this.extraEnv,
       DSH_HOME: this.home,
       DSH_FASTLOAD_DEBUG: '1',
       NO_COLOR: '1',

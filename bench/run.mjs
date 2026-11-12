@@ -20,7 +20,9 @@ Options:
   --out <dir>           Result directory (default: bench/results/<timestamp>)
   --reps <n>            Override warm-scenario repetitions (default 10)
   --cold-reps <n>       Cold-host repetitions (default 5)
-  --scenarios <list>    Comma list: cold-host,warm-host,cache-hit,cache-miss
+  --scenarios <list>    Comma list: cold-host,warm-host,cache-hit,cache-miss,plain
+  --profile <mode>      plugin (default) or stock (profile must not load dsh-fastload)
+  --host-env <K=V>      Extra environment variable for the DSH host (repeatable)
   --samples-filter <l>  Comma list of sample keys
   --host-port <port>    Default 3597
   --cdp-port <port>     Default 9337
@@ -38,6 +40,8 @@ function parseArgs(argv) {
     reps: 10,
     coldReps: 5,
     scenarios: ['cold-host', 'warm-host', 'cache-hit', 'cache-miss'],
+    profile: 'plugin',
+    hostEnv: [],
     sampleFilter: null,
     hostPort: 3597,
     cdpPort: 9337,
@@ -55,6 +59,8 @@ function parseArgs(argv) {
     else if (a === '--reps') opts.reps = Number(next());
     else if (a === '--cold-reps') opts.coldReps = Number(next());
     else if (a === '--scenarios') opts.scenarios = next().split(',').map((x) => x.trim()).filter(Boolean);
+    else if (a === '--profile') { const v = next(); if (!['plugin', 'stock'].includes(v)) throw new Error('--profile must be plugin or stock'); opts.profile = v; }
+    else if (a === '--host-env') { const v = next(); const i = v.indexOf('='); if (i <= 0) throw new Error('--host-env expects KEY=VALUE, got ' + v); opts.hostEnv.push([v.slice(0, i), v.slice(i + 1)]); }
     else if (a === '--samples-filter') opts.sampleFilter = next().split(',').map((x) => x.trim()).filter(Boolean);
     else if (a === '--host-port') opts.hostPort = Number(next());
     else if (a === '--cdp-port') opts.cdpPort = Number(next());
@@ -208,17 +214,26 @@ async function main() {
   const dshVersion = versionOfDsh(dshBin);
   const pluginPkg = readJson(path.join(REPO_ROOT, 'package.json'));
   const profileLink = path.join(home, 'profiles', 'web', 'node_modules', 'dsh-fastload');
-  if (!(await exists(profileLink))) throw new Error('profile link missing: ' + profileLink + ' (create a junction to ' + REPO_ROOT + ')');
-  const profileReal = fs.realpathSync(profileLink);
-  if (norm(profileReal) !== norm(REPO_ROOT)) throw new Error('profile dsh-fastload resolves to ' + profileReal + ', not worktree ' + REPO_ROOT);
   const profilePkg = readJson(path.join(home, 'profiles', 'web', 'package.json'));
-  if (!(profilePkg.dsh?.profile?.bundles || []).includes('dsh-fastload')) throw new Error('profile bundles do not include dsh-fastload');
+  const profileBundles = profilePkg.dsh?.profile?.bundles || [];
+  if (opts.profile === 'stock') {
+    let linkPresent = false;
+    try { linkPresent = fs.lstatSync(profileLink).isSymbolicLink() || fs.existsSync(profileLink); } catch {}
+    if (linkPresent) throw new Error('stock profile still has dsh-fastload at ' + profileLink);
+    if (profileBundles.includes('dsh-fastload')) throw new Error('stock profile bundles must not include dsh-fastload');
+  } else {
+    if (!(await exists(profileLink))) throw new Error('profile link missing: ' + profileLink + ' (create a junction to ' + REPO_ROOT + ')');
+    const profileReal = fs.realpathSync(profileLink);
+    if (norm(profileReal) !== norm(REPO_ROOT)) throw new Error('profile dsh-fastload resolves to ' + profileReal + ', not worktree ' + REPO_ROOT);
+    if (!profileBundles.includes('dsh-fastload')) throw new Error('profile bundles do not include dsh-fastload');
+  }
 
   const pagesDir = path.join(home, 'cache', 'dsh-fastload', 'pages');
   const cacheRoot = path.join(home, 'cache', 'dsh-fastload');
   const hostPort = opts.hostPort;
   const cdpPort = opts.cdpPort;
-  const host = new DshHost({ home, port: hostPort, workspace, dshBin, outDir, label: 'host' });
+  const hostEnv = Object.fromEntries(opts.hostEnv);
+  const host = new DshHost({ home, port: hostPort, workspace, dshBin, outDir, label: 'host', extraEnv: hostEnv });
   const chrome = new HeadlessChrome({ port: cdpPort, userDataDir: path.join(BENCH_DIR, '.chrome', runId), chromePath: opts.chrome, outDir });
   const raw = {
     meta: {
@@ -231,7 +246,10 @@ async function main() {
       outDir,
       samplesFile: path.basename(samplesPath),
       git: gitInfo(),
-      plugin: { name: pluginPkg.name, version: pluginPkg.version },
+      profile: opts.profile,
+      hostEnv: opts.hostEnv.map(([k, v]) => k + '=' + v),
+      docStartJs: process.env.BENCH_DOC_START_JS || null,
+      plugin: { name: pluginPkg.name, version: pluginPkg.version, loaded: opts.profile === 'plugin' },
       dsh: { bin: dshBin, ...dshVersion },
       chrome: { path: chrome.chromePath, version: null },
       node: process.version,
@@ -276,7 +294,7 @@ async function main() {
     log('Chrome ' + raw.meta.chrome.version + ' on CDP ' + cdpPort);
     await writeJson(path.join(outDir, 'raw.json'), raw);
 
-    const runRep = async ({ scenario, sample, rep, expectedCache, cacheFile: suppliedCacheFile = null }) => {
+    const runRep = async ({ scenario, sample, rep, expectedCache = 'n/a', cacheFile: suppliedCacheFile = null }) => {
       const label = scenario + '-' + sample.key + '-' + String(rep).padStart(2, '0');
       const repStart = Date.now();
       let cacheFile = suppliedCacheFile;
@@ -319,7 +337,7 @@ async function main() {
       r.label = label;
       r.expectedCache = expectedCache;
       r.cacheObserved = observed;
-      r.cacheMatchesExpectation = expectedCache === observed;
+      r.cacheMatchesExpectation = expectedCache === 'n/a' ? true : expectedCache === observed;
       r.cacheFile = cacheFile ? path.basename(cacheFile) : null;
       r.corrupt = corrupt;
       raw.runs.push(r);
@@ -381,7 +399,7 @@ async function main() {
       await host.stop();
     }
 
-    if (scenarios.includes('warm-host') || scenarios.includes('cache-hit') || scenarios.includes('cache-miss')) {
+    if (scenarios.includes('warm-host') || scenarios.includes('cache-hit') || scenarios.includes('cache-miss') || scenarios.includes('plain')) {
       log('=== starting warm host ===');
       await host.start();
       await utilSleep(500);
@@ -389,6 +407,15 @@ async function main() {
         const boot = await bootstrapBlank({ chromePort: cdpPort, tokenUrl: host.tokenUrl, outDir });
         blankSessionId = boot.blankSessionId;
         log('blank session: ' + maskSession(blankSessionId) + ', sidebar rows=' + boot.rows);
+      }
+
+      if (scenarios.includes('plain')) {
+        log('=== plain: warm host, direct open, no page-cache handling ===');
+        for (const s of samples) {
+          for (let rep = 1; rep <= opts.reps; rep += 1) {
+            await runRep({ scenario: 'plain', sample: s, rep, expectedCache: 'n/a' });
+          }
+        }
       }
 
       if (scenarios.includes('warm-host')) {
