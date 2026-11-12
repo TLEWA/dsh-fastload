@@ -13,6 +13,9 @@ the exploratory workspace on 2026-11-09.
 - `plugin-optimization-baseline.md` — stage 0 reproducible first-open baseline:
   cold/warm host, cold session, page-cache hit and forced invalidation, with
   renderer/host timing split and per-run raw samples.
+- `css-content-visibility-experiment.md` — stage-4 candidate E: pure-CSS
+  `content-visibility` lazy rendering; NO-GO (redundant with `hidden="until-found"`,
+  no measurable steady-state gain, stale-size risk on resize/zoom).
 
 The documents contain machine-specific absolute paths from the test machine;
 they are retained for reproducibility, not as install instructions.
