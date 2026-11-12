@@ -856,4 +856,3 @@ test('disposing the plugin clears a pending deferral', async () => {
     await cleanupDir(dir);
   }
 });
-
