@@ -13,8 +13,9 @@ authorization error was observed. In alternating warm-host A/B measurements, per
 placeholders reduce click-to-first-row by 10.9% on the long fixture and 11.0% on the normal
 fixture (n=6, standard preset), while cutting first-row DOM by 30% and 43%. Pixel parity after
 expansion and re-collapse is exact at 1280x900 except for one anti-aliased pixel in a detailed
-normal expanded view. Two limitations remain: real browser find-in-page (Ctrl+F / `beforematch`)
-could not be driven through CDP and is therefore not verified, and the long fixture gains a
+normal expanded view. Real `FindInPage` has now been exercised through a page-level CDP
+session: the structural reveal passes, but find semantics and the active
+match/highlight/scroll fail. The other limitation remains: the long fixture gains a
 second ~39 ms Long Task after the first row. The permanent-placeholder PoC is therefore
 **conditionally GO only as an off-by-default experiment**, not as a default behavior. The
 progressive-hydration control is **NO-GO**: on a turn-rail jump into unloaded history it drained
@@ -27,13 +28,13 @@ summary text without mounting the full tool tree.
 
 | 问题 | 结论 |
 |---|---|
-| 插件内是否有可运行方案 | **有，条件 GO**：永久占位实验在真实 DSH Web 中功能、锚点、翻页、展开/折叠均通过，像素等价（1 个抗锯齿像素除外）；默认关闭 |
-| 是否建议默认开启或发布 | **否**：依赖私有 `entry.component`；真实 Ctrl+F 未验证；long 首行后多一个 Long Task；normal/long 收益不一致 |
-| 旧 NO-GO 是否被推翻 | **部分**：不需要新增 slot 声明，也不需要复刻 15 种节点视图；但私有接口、查找语义和节点局部状态风险仍在 |
+| 插件内是否有可运行方案 | **有，条件 GO（默认关闭实验）；结构性揭示 PASS，但查找语义 FAIL**：永久占位实验在真实 DSH Web 中功能、锚点、翻页、展开/折叠均通过，像素等价（1 个抗锯齿像素除外）；默认关闭 |
+| 是否建议默认开启或发布 | **否**：依赖私有 `entry.component`；查找语义不等价（误报/漏报/活动匹配丢失）；long 首行后多一个 Long Task；normal/long 收益不一致 |
+| 旧 NO-GO 是否被推翻 | **部分**：不需要新增 slot 声明，也不需要复刻 15 种节点视图；但私有接口和节点局部状态风险仍在，且“占位不破坏查找”的假设已被真实 `FindInPage` 实测证伪（误报/漏报/活动匹配丢失） |
 | 渐进补挂（progressive） | **NO-GO**：首开可用且最终 DOM 与原生一致，但 rail/未加载历史场景后台长任务严重退化（12.9 s、93 个 69–110 ms Long Task） |
 | 上游是否值得做 | **值得，但应换成 U3**：不改 ChatFlow/ChatGroupSeat，只给 `ChatNodeSeat` 加 `searchOnly`，由 tool-call 注册组件渲染精确摘要文本 |
 
-一句话：**插件 PoC 证明了“折叠 tool-call 可以省略完整视图并显著减少首屏 DOM/挂载”，但没有证明它可安全默认发布；上游 U3 是把同一收益做成可接受产品的路径。**
+一句话：**插件 PoC 证明了“折叠 tool-call 可以省略完整视图并显著减少首屏 DOM/挂载”，但没有证明它可安全默认发布；真实 `FindInPage` 实测显示结构性揭示 PASS、查找语义 FAIL；上游 U3 是把同一收益做成可接受产品的路径。**
 
 ## 1. 背景与旧结论
 
@@ -61,7 +62,7 @@ summary text without mounting the full tool tree.
 
 | 路径 | 首帧 | 最终 DOM | 查找语义 | 结论 |
 |---|---|---|---|---|
-| 永久占位 permanent | 折叠 tool-call 只渲染文本占位 | 保持占位，展开时才挂原生 | 文本镜像不精确，真实 Ctrl+F 未验证 | 条件 GO（实验） |
+| 永久占位 permanent | 折叠 tool-call 只渲染文本占位 | 保持占位，展开时才挂原生 | 结构性揭示 PASS；误报/漏报/活动匹配丢失 FAIL | 条件 GO（实验） |
 | 渐进补挂 progressive | 先占位，双 rAF 后分片补原生 | 最终与原生一致 | Ctrl+F 捕获阶段 `flushSync` 全量补回 | **NO-GO**（rail 场景） |
 | 原生 off | 全量挂载 | 原生 | 原生 | 基线 |
 
@@ -111,16 +112,30 @@ summary text without mounting the full tool tree.
 
 ### D. Ctrl+F / hidden=until-found 兼容
 
-#### D1. 永久占位文本作为查找镜像（未证明）
+#### D1. 永久占位文本作为查找镜像（已实测：结构揭示 PASS，查找语义 FAIL）
 
-- 占位文本来自 `node.data` 的有界递归提取（最多 4000 字符，深度 ≤6，跳过 `raw/json`），放在 `hidden=until-found` 组内。
-- 以原生折叠摘要的 6+ 字符 token 检查占位文本：覆盖 **186/205 = 90.7%**；缺失 token 包括 `failed`、`execution`、`deadline`、`reached`、`120000ms`、`aborted`、`investigation`、`ranges`、`compress`、`Desktop`、`plugins`、`ops_bash`、`background`。
-- 占位还包含原生折叠态不显示的原始参数，存在“查找命中折叠态看不见的文本”的误报风险。
-- `window.find` 对合成 `hidden=until-found` 文本返回 true，但不触发 `beforematch`；对本应用 hidden 组内原生摘要返回 false，对占位 token 也 false（尽管 `document.body.textContent` 包含它）。
-- CDP 没有可用的 FindInPage 域（`Schema.getDomains` 无该域，`FindInPage.findFirst` 返回空对象）；headless 的 Ctrl+F 只触发页面 keydown；headful Chrome 的 Ctrl+F 同样只触发 keydown，`Input.insertText` 不改变页面，`Page.captureScreenshot` 也不含浏览器查找栏。**真实浏览器 find-in-page 仍未验证**。
-- 旧永久实验的真实查找截图（`bench/.s4-out/find-lazy/lazy-immediate.png`）显示：查找命中占位 token 后组展开，但没有高亮；该 token 在原生折叠摘要中不存在，属于“查找揭示差异”。这不能证明正常滚动/展开有差异，但证明查找路径有风险。
+占位文本来自 `node.data` 的有界递归提取（最多 4000 字符，深度 ≤6，跳过 `raw/json`），放在 `hidden=until-found` 组内。真实 `FindInPage` 已在页面级 CDP session 上跑通（`FindInPage.findFirst/findNext/findPrev/stop`；Chrome 157，`WebContents::Find`），方法、逐 token 表格与截图见 `docs/research/stage4-find-verification.md`。旧结论“CDP 缺少 FindInPage 域”来自 browser-level session 的 `-32601` 和 `Schema.getDomains` 结果，是 session 层级的误判，已推翻。
 
-结论：**未能证明兼容**。D1 只能作为“文本仍在 DOM 中”的弱保证，不能宣称 Ctrl+F 等价。
+**结构揭示 PASS（common token）。** 对同时存在于占位与原生隐藏文本中的 `.../bench/bug6-res.json`（原生 1 次、占位 4 次）：`findFirst` 57 ms 返回，`beforematch` 于 124.4 ms 触发，lazy 占位 28→0（141.4 ms），原生 group 展开、`aria-expanded` 变 true，最终 DOM 2877→4122，与 off 的 4122 一致，reveal 后 `innerText` 含该 token。显示/揭示链路成立。
+
+**查找语义 FAIL。**
+
+- **误报**：仅存在于占位的 `scans:22`（原生 0 次、占位 1 次）被 `findFirst` 命中（11 ms、`beforematch` 76.8 ms、lazy 28→0、DOM 4122、aria true），但 reveal 后原生 flow 与 `innerText` 均不含该 token，命中 rect 变 null——用户看到一条结果，展开后结果不存在。来源是占位保留了 `node.data` 中的原始参数。
+- **漏报**：原生折叠摘要中的 `120000ms`（原生 1 次、占位 0 次）findFirst 无 `beforematch`、无 mutation，lazy 28、hidden 57、DOM 2877 全程不变；该文本在 permanent 下完全搜不到。
+- **活动匹配/高亮/滚动丢失**：common 文本虽恢复，但 0/250/1050 ms 均无橙色高亮，页面仍锚在底部（scrollTop 19928→20376，容器最大值），没有滚到匹配位置；`findNext` 7 ms 把 scrollTop 从 20376 改到 5571，但该处 flow 不含 token、无高亮；`findPrev` 9 ms 停在 5571 不动。
+- **对照**：data URL 校准证明 FindInPage 命令本身可用——findFirst/findNext/findPrev 都能触发 `beforematch`、移除 `hidden`、绘制橙色高亮并滚动（`getSelection()` 为空是因为高亮在浏览器绘制层）；可见 token “已停止” 的对照截图（`bench/.s4-out/find-verify2/vis-stop-at300.png`）有 4 处黄色高亮。差异来自“占位替换销毁了当前匹配 DOM”，不是 CDP 命令。
+
+**覆盖率**（唯一 token 类型覆盖率，不是字符覆盖率；详表见验证报告第 3 节）：
+
+- 严格早期口径（token 必须同时含字母和数字）：6+ **47.62%**（10/21）、8+ **17.86%**（5/28）；
+- 修正口径（字母数字字符组成，不要求两类都有）：6+ **56.66%**（166/293）、8+ **37.44%**（82/219）；
+- occurrence-weighted（修正口径）：72.55%（592/816）、45.74%（172/376）；
+- 占位唯一 token 远多于原生（6+ 868 vs 293，8+ 1023 vs 219），占位含原始参数、路径、JSON 片段，误报面大；
+- 旧报告的 90.7%（186/205）来自不同语料/正则，只作历史口径，与本轮不可比，也不能证明查找兼容。
+
+`window.find` 的结论仍然成立但不能替代真实查找：它对本应用 hidden 组内原生摘要返回 false，对占位 token 也 false（尽管 `document.body.textContent` 包含它），并且不触发 `beforematch`。旧永久实验截图 `bench/.s4-out/find-lazy/lazy-immediate.png` 显示“命中占位 token 后组展开但无高亮”，与本轮实测一致。
+
+结论：**结构性揭示 PASS，查找语义 FAIL**。D1 不能作为 Ctrl+F 兼容方案，只能作为默认关闭的性能实验。
 
 #### D2. 首帧占位、idle 后挂载原生（已否决）
 
@@ -282,14 +297,37 @@ permanent 在 long 上首行 Long Task 从 142.5 降到 118.5 ms，但稳定后�
 
 **结论：正常滚动、展开、再折叠的可见区域与文本等价（1 个抗锯齿像素除外），展开后 DOM 数与原生一致。**
 
-## 7. 真实 find-in-page 的验证边界
+## 7. 真实 find-in-page 验证结果与边界
 
-- CDP 无 FindInPage 域；headless/headful 的 Ctrl+F 只触发页面 DOM keydown，不能打开/驱动浏览器查找栏；
-- headful Chrome（9362，profile `bench/.s4-out/find-headful`）实测：Ctrl+F 后页面 keydown 触发，progressive lazy 28→0、done、revealReason=`keydown`，但 `beforematch` 计数 0、hidden=until-found 仍 57、group aria 仍 false、active=BODY；`Input.insertText('Inspect')` 不改变 DOM/hash；`after-find.png` 只有页面内容，没有查找栏。
-- 永久实验的旧截图 `bench/.s4-out/find-lazy/lazy-immediate.png` 是唯一“查找命中占位 token”的可见证据：组展开但无高亮，token 不在原生折叠摘要中。
-- `window.find` 只证明文本可索引，不触发 `beforematch`；不能替代真实查找。
+**能力。** 页面级 CDP session 支持 `FindInPage.findFirst/findNext/findPrev/stop`（Chrome 157，`WebContents::Find`）。旧“CDP 缺少 FindInPage 域”的判断来自 browser-level session 返回 `-32601`、`Schema.getDomains` 不含该域，属于 session 层级误判，已推翻。headless/headful 的 Ctrl+F 仍然只触发页面 DOM keydown、不能打开浏览器查找栏，但这已不再是验证阻塞项。
 
-**结论：真实 Ctrl+F / beforematch 兼容性未验证。任何“Ctrl+F 无差异”的结论都超出了本轮证据。**
+**data URL 校准。** 两个 `hidden=until-found` 段含同一 token：findFirst/findNext/findPrev 均能触发 `beforematch`、移除 `hidden`、绘制橙色高亮并滚动，prev 回到首个匹配。`getSelection()` 始终为空，因为高亮在浏览器绘制层，不能用 Selection 判断。
+
+**正式 fixture（long）三类 token**（`bench/.s4-out/find-verify2/result.json`，每类在全新 permanent 页面单独 findFirst）：
+
+| case | token | callMs | beforematch | lazy | 最终 DOM | reveal 后文本 | 判定 |
+|---|---|---:|---:|---:|---:|---|---|
+| common | `.../bug6-res.json` | 57 | 124.4 ms | 28→0（141.4 ms） | 4122（aria true） | innerText 含 token | 显示 PASS |
+| extra | `scans:22` | 11 | 76.8 ms | 28→0（93.7 ms） | 4122（aria true） | token 消失 | 误报 |
+| missing | `120000ms` | 5 | 无 | 28 不变 | 2877 | 无 | 漏报 |
+
+**活动匹配丢失。**
+
+- common 展开后页面仍锚在底部（scrollTop 19928→20376，容器最大值），0/250/1050 ms 截图无橙色高亮；可见 token “已停止” 的对照截图（`bench/.s4-out/find-verify2/vis-stop-at300.png`）有 4 处黄色高亮，说明高亮器本身工作，是替换操作销毁了当前匹配。
+- `findNext` 7 ms：scrollTop 20376→5571，但该处 flow 不含 token、无可见高亮；`findPrev` 9 ms 停在 5571 不动。
+- data URL 对照证明 findNext/findPrev 命令本身可用，问题在“替换掉当前匹配 DOM”，不是 CDP 调用。
+
+**覆盖率与占位 token 数量。** 严格早期口径 6+ 47.62%（10/21）、8+ 17.86%（5/28）；修正口径 56.66%（166/293）、37.44%（82/219）；occurrence-weighted 72.55%（592/816）、45.74%（172/376）。占位唯一 token 6+ 为 868 vs 原生 293，8+ 为 1023 vs 219；旧 90.7% 是不同语料/正则下的历史值，不可比。
+
+**边界（仍未验证）。**
+
+- CDP 没有查找栏的 1/N 计数、上下箭头和“DOM 替换后自动重搜”；真实 UI 可能显示 0/0 或触发重搜，但不会保留当前高亮。
+- findNext/findPrev 在 permanent 替换后的行为只测了一个 token/fixture；data URL 对照只证明命令本身可用。
+- 覆盖率只算 long fixture；normal 的 85 组占位未逐 token 重算。
+- headless/headful 的 Ctrl+F keydown 是 CDP 合成按键；菜单/系统级查找未验证。
+- 未验证桌面 Electron；真实查找栏 UI 的 1/N 计数与自动重搜也未验证。
+
+**结论：结构揭示 PASS；查找语义与活动匹配 FAIL。任何“Ctrl+F 无差异”的结论仍超出本轮证据。**
 
 ## 8. progressive 的 NO-GO 证据
 
@@ -338,9 +376,11 @@ permanent 在 long 上首行 Long Task 从 142.5 降到 118.5 ms，但稳定后�
 4. `ChatFlow`（同文件 6443）不需要改：`renderSlot` 仍由 flow 注入，`searchOnly` 只是 owner 新字段。
 5. 若要扩到 assistant-step，按同样方式给对应注册组件加包装；摘要文本未精确抽出前保持原生挂载。
 
-### 9.2 为什么这样能保留 Ctrl+F
+### 9.2 为什么上游 U3 可能恢复查找语义
 
-- 折叠时 `hidden=until-found` 子树里是**与折叠摘要同源的纯文本**，用户查找命中的字符串与展开后看到的摘要一致。
+当前 permanent 占位**并未**保留查找语义：实测有误报（`scans:22`）、漏报（`120000ms`），reveal 后活动匹配/高亮/滚动也会丢失（见 D1 与第 7 节）。U3 只是候选修复，不是已证结论。其理由是：
+
+- 折叠时 `hidden=until-found` 子树里是**与折叠摘要同源的纯文本**，用户查找命中的字符串与展开后看到的摘要一致，可消除“占位含原始参数”造成的误报面。
 - `beforematch` / 用户点击展开后 `processOpen=true`，`searchOnly=false`，React 在同一位置挂载完整 `ToolCallTree`；文本镜像被替换，不重复命中。
 - 如果浏览器在替换瞬间滚动到已被移除的文本节点，可能落点抖动；最小验收要求真实 Chrome 对折叠组内唯一字符串做 Ctrl+F，确认 group 展开且选区/滚动落在完整视图内。失败就退回“不懒挂载该 kind”。
 
@@ -355,8 +395,8 @@ permanent 在 long 上首行 Long Task 从 142.5 降到 118.5 ms，但稳定后�
 
 ## 10. 失败、未执行与限制
 
-- 真实 Ctrl+F / `beforematch` 未验证：CDP 无法驱动浏览器查找栏；headful 只验证了 keydown 路径。
-- 永久占位文本不是精确摘要：90.7% token 覆盖，且含折叠态不显示的原文；不能作为查找等价方案。
+- 真实查找已用页面级 CDP `FindInPage` 验证（命中、`beforematch`、hidden 移除、结构揭示）；真实查找栏 UI 的 1/N 计数、自动重搜、活动匹配是否更差仍未验证。
+- 永久占位文本不是精确摘要：严格口径 6+/8+ 覆盖率 47.62%/17.86%，修正口径 56.66%/37.44%（旧 90.7% 为不同语料/正则的历史值，不可比）；占位还含折叠态不显示的原始参数，实测误报/漏报/活动匹配丢失；不能作为查找等价方案。
 - long 首行后的第二个 Long Task 未定位；总 Long Task 可能比 off 更差。
 - 运行时卸载/热重载还原未实测；只验证了代码路径和关闭开关后的 reload。
 - Tab 键盘全链路、屏幕阅读器、实际 rewind 未验证。
@@ -370,17 +410,17 @@ permanent 在 long 上首行 Long Task 从 142.5 降到 118.5 ms，但稳定后�
 | 风险 | 影响 | 缓解 |
 |---|---|---|
 | `entry.component` 私有、可被下一个 DSH 版本改掉 | 开关打开后可能不生效或渲染异常 | 能力检测 + try/catch + 默认关闭；升级后重跑 A/B |
-| 文本镜像不精确 | Ctrl+F 漏命中/多命中 | 默认关闭；上游改为精确 `toolCallSearchText`；真实浏览器验收 |
+| 文本镜像不精确 | Ctrl+F 漏命中/多命中/活动匹配丢失（已实测） | 默认关闭；上游改为精确 `toolCallSearchText`；真实查找栏验收 |
 | 节点视图卸载 | 局部状态、内部滚动、二级展开丢失 | 只对 tool-call 折叠节点；文档明示；上游可保留状态或接受 |
 | long 第二个 Long Task | 总阻塞增加 | 定位来源；上游验收要求总长任务不退化 |
 | slot 重注册/热重载竞态 | wrapper 覆盖或丢失 | 监听 `slots/changed`、标记防重复、dispose 条件还原 |
 | 与其它改 flow entry 的插件冲突 | 互相覆盖 | `__dshFastloadLazyGroups` 标记；检测到已标记就不安装 |
 | progressive rail 长任务 | 后台卡顿 | **已判 NO-GO**，不默认开启，不推荐 |
-| 真实查找栏行为未知 | 用户 Ctrl+F 可能落到占位/无高亮 | 不宣称兼容；上游 U3 用精确摘要并做真实浏览器验收 |
+| 真实查找栏行为未验证（计数/重搜） | 用户 Ctrl+F 可能显示 0/0 或重搜后落空；活动匹配/高亮丢失已实测 | 不宣称兼容；上游 U3 用精确摘要并做真实查找栏验收 |
 
 ## 12. 下一步建议
 
-1. **不要把 permanent 设为默认**；若要继续插件路线，先在真实可见 Chrome 手工做 Ctrl+F/beforematch 回归，并定位 long 第二个 Long Task。
+1. **不要把 permanent 设为默认**；页面级 `FindInPage` 已实测结构揭示 PASS、查找语义 FAIL。若要继续插件路线，发布前仍需在真实可见 Chrome 查找栏做手工回归（验证 1/N 计数、自动重搜、活动匹配是否更差），并定位 long 第二个 Long Task。
 2. **优先上游 U3**：只覆盖 tool-call，先做 `toolCallSearchText` + `ToolCallNode`，不碰 ChatFlow/ChatGroupSeat；用真实 Chrome 查找验收。
 3. 在真实桌面 Electron 复测 normal/long；headless CLI 数据不能直接外推到桌面。
 4. 开关打开时补一次禁用/热重载回归，确认 `entry.component` 还原。
@@ -408,6 +448,6 @@ permanent 在 long 上首行 Long Task 从 142.5 降到 118.5 ms，但稳定后�
 - parity：`bench/.s4-out/parity/`、`bench/.s4-out/parity-progressive/`；
 - rail：`bench/.s4-out/rail-parity/`；
 - lifecycle：`bench/.s4-out/lifecycle/`、`expand2/`、`progressive-lifecycle/`、`progressive-extras/`；
-- 查找：`bench/.s4-out/find-headful/after-find.png`、`bench/.s4-out/find-lazy/lazy-immediate.png`；
+- 查找：`bench/.s4-out/find-verify2/{result.json,vis-stop-at300.png}`（真实 FindInPage，脚本 `bench/run-s4-find-verify.mjs`、`bench/proto-real-find-vis.mjs`）、`bench/.s4-out/find-headful/after-find.png`、`bench/.s4-out/find-lazy/lazy-immediate.png`；
 - 运行脚本：`bench/run-s4-*.mjs`（临时脚本，未全部提交）；首行定义与 DOM/commit/long task 采集见 `bench/lib/measure.mjs`、`bench/lib/probe.mjs`。
 - 代码：`client.js:123-574`、`src/lazy-groups.js`、`test/lazy-groups.test.js`。
