@@ -10,6 +10,9 @@ the exploratory workspace on 2026-11-09.
   blank-page counterexample and the maxBytes rich-tail/empty-tail comparison.
 - `dsh-long-session-open-lag.patch.md` — draft patch notes, not applied to the
   installed DSH build.
+- `css-content-visibility-experiment.md` — stage-4 candidate E: pure-CSS
+  `content-visibility` lazy rendering; NO-GO (redundant with `hidden="until-found"`,
+  no measurable steady-state gain, stale-size risk on resize/zoom).
 
 The documents contain machine-specific absolute paths from the test machine;
 they are retained for reproducibility, not as install instructions.
