@@ -116,3 +116,50 @@ test('does not trim when there are fewer than minTurns turns', () => {
   });
   assert.equal(result.info, null);
 });
+test('keeps a rewind-recovered turn that the byte budget would cut away', () => {
+  // A tail-only page whose newest turns are hidden by a /rewind cut; the
+  // extension put one older visible turn in front of them. Trimming must not
+  // hand that turn back to the hidden side.
+  const opening = page(8, 2000);
+  const protectedSeq = opening.records[10].event.seq; // user/message of turn 3
+  const result = planTrim({ ...opening, cuts: true }, {
+    maxBytes: 3000,
+    hardCapBytes: 10 * 1024 * 1024,
+    minTurns: 2,
+    protectSeq: protectedSeq,
+  });
+
+  assert.notEqual(result.info, null);
+  const first = result.opening.records[0].event;
+  assert.equal(first.type, 'turn/start');
+  assert.ok(first.seq <= protectedSeq);
+  const kept = result.opening.records.some(
+    (record) => record.event.type === 'user/message' && record.event.seq === protectedSeq
+  );
+  assert.equal(kept, true);
+  assert.ok(result.info.cutIndex <= result.info.protectedIndex);
+});
+
+test('leaves the page alone when the recovered turn cannot fit the hard cap', () => {
+  const opening = page(8, 2000);
+  const protectedSeq = opening.records[10].event.seq;
+  const result = planTrim(opening, {
+    maxBytes: 3000,
+    hardCapBytes: 8000,
+    minTurns: 2,
+    protectSeq: protectedSeq,
+  });
+
+  assert.equal(result.info, null);
+  assert.equal(result.opening, opening);
+});
+
+test('ignores a protectSeq that is not in the page', () => {
+  const opening = page(8, 2000);
+  const result = planTrim(opening, {
+    maxBytes: 3000,
+    minTurns: 2,
+    protectSeq: 999999,
+  });
+  assert.notEqual(result.info, null);
+});

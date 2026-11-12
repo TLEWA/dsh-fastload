@@ -293,8 +293,24 @@ async function extendRewoundPage(opening, extension) {
   };
 }
 
+/**
+ * The first message that survives every rewind cut in this page. A trim that
+ * cuts at or before its turn would throw away the only visible content.
+ */
+function firstVisibleMessageSeq(records) {
+  const cuts = findRewindCuts(records);
+  if (cuts.length === 0) return null;
+  for (const record of records) {
+    const event = record && record.event ? record.event : record;
+    if (!event || typeof event.seq !== 'number') continue;
+    if (event.type !== 'user/message' && event.type !== 'assistant/message') continue;
+    if (!hiddenByCuts(event.seq, cuts)) return event.seq;
+  }
+  return null;
+}
+
 function wrapFirstSnapshot(result, config, state, ctx, extension) {
-  const trimFrame = (frame) => {
+  const trimFrame = (frame, protectSeq) => {
     const compacted = planCompact(frame, config);
     if (compacted.info) {
       state.compacts += 1;
@@ -308,7 +324,8 @@ function wrapFirstSnapshot(result, config, state, ctx, extension) {
         } catch {}
       }
     }
-    const { opening, info } = planTrim(compacted.opening, config);
+    const trimOptions = Number.isFinite(protectSeq) ? { ...config, protectSeq } : config;
+    const { opening, info } = planTrim(compacted.opening, trimOptions);
     if (!info) return opening;
     state.trims += 1;
     state.lastTrim = info;
@@ -325,8 +342,13 @@ function wrapFirstSnapshot(result, config, state, ctx, extension) {
   };
 
   const prepare = async (frame) => {
+    const beforeRecords = frame && Array.isArray(frame.records) ? frame.records.length : 0;
     const extended = extension ? await extendRewoundPage(frame, extension) : frame;
-    return trimFrame(extended);
+    const afterRecords = extended && Array.isArray(extended.records) ? extended.records.length : 0;
+    // Only a page that actually grew needs the protection: its visible turn
+    // sits in front of the hidden tail, where the byte budget would cut first.
+    const protectSeq = afterRecords > beforeRecords ? firstVisibleMessageSeq(extended.records) : null;
+    return trimFrame(extended, protectSeq);
   };
 
   if (result && typeof result.then === 'function') {

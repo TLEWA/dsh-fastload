@@ -39,6 +39,14 @@ All notable changes are documented here. Versions follow
   pages backwards with the built-in button instead of rebuilding the view,
   because a rebuild cannot un-hide rewound content. Bench first row went from
   1,556/1,001/916 ms (one extra click) to 813/747/783 ms (none).
+- **Byte trimming no longer undoes a rewind extension.** With
+  `DSH_FASTLOAD_MAX_BYTES` enabled and the newest two turns hidden by a
+  rewind cut, the visible turn pulled in by the extension used to be trimmed
+  away again, leaving the first screen blank and wasting one history read.
+  `trim` now accepts `protectSeq`: after an extension, the turn holding the
+  first visible message is protected, and the page is left untrimmed when
+  even that turn exceeds the hard cap. The extension result is subject to
+  that single protected trim only.
 - The opening-page cache now validates every entry (non-empty `snapshot`,
   last `seq` equal to the cursor) and drops the file otherwise, so a bad page
   can never be served.
@@ -61,7 +69,7 @@ All notable changes are documented here. Versions follow
 
 - Add `test/compact.test.js`, `test/page-cache.test.js` and `test/scan-cache.test.js`, plus three
   client-stream integration cases (strip the first frame only, swallow a duplicate opening on a
-  cache hit, replay events past the cached cursor). `npm test` now runs 36 tests.
+  cache hit, replay events past the cached cursor). `npm test` now runs 51 tests.
 
 ## [0.3.0] - 2026-11-11
 
