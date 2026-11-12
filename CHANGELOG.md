@@ -9,6 +9,9 @@
 
 ### 修复
 
+- **启动预热要求可用的 `mainReference`。** `armRestoreSignal` 现在把 `uiWorkspace.mainReference` 的对象形状与可读的字符串 `sessionId` 一并列为启动条件；缺失时预热直接标记 `skipped`（`main-reference-unavailable`），不再订阅选择信号或排队 follow，避免与原生恢复重复构建。回归测试：`skips restore prewarm when uiWorkspace has no live main reference`。
+- **空闲刷新构建从入口即可取消。** 构建一开始就创建并登记 `AbortController`；`cache.lookup`、settle 等待、每次 `statRevision` 与首帧读取之后都检查取消与 `active`，会话在准备阶段被销毁时不再 follow 或写缓存，`report.aborted` 只计一次，超时仍按失败计数。回归测试：`a dispose during the page lookup cancels the build before it follows or stores`。
+- **构建前读取 Agent 实时状态。** `createCacheRefresh` 接受可选 `statusOf(sessionId)`，`index.js` 传入 `agentStatusReader`；构建入口与 settle 之后各查询一次，`running` 时跳过 follow 并按 `idleMs` 重新排期，`idle`/`unknown` 或查询抛错保持原有放行行为，事件路径的 `agentStatus` 检查不变。回归测试：`reads the live Agent state when the event map is empty`。
 - **页缓存命中后关闭流不再遗留调试探针。** `DSH_FASTLOAD_DEBUG=1` 且客户端只读取缓存首帧就 `return()` 时，整个生成器（含缓存 yield）都由 `finally` 停止探针，避免递归 `setImmediate` 持续占用 Host。回归测试：`closing after the cached frame stops the debug lag probe`。
 - **启动预热先订阅再发起 follow。** `armRestoreSignal` 先建立 selection 订阅，确认状态仍为 `waiting` 后才排队；订阅抛错时预热标记 failed，不会留下已启动的 follow。回归测试：`does not prewarm when the selection subscription throws`。
 - **超时的页缓存读取有界关闭迭代器。** `readOpening` 的 `return()` 最多等待 250 ms 并与超时竞速，随后释放全局 inFlight，超时仍计入失败。回归测试：`a timed-out opening releases the in-flight slot when return never settles`。

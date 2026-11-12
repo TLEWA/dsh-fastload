@@ -202,6 +202,11 @@ export function createCacheRefresh(options = {}) {
     };
   const probeLoad = typeof options.probeLoad === 'function' ? options.probeLoad : defaultLoadProbe;
   const now = typeof options.now === 'function' ? options.now : Date.now;
+  // The host's Agent map is event-driven, so a plugin installed while an Agent
+  // is already working never sees a status event for it. Ask the live host
+  // state as well; absent, throwing or unknown stays "unknown" and never
+  // blocks a build (there may be no agents service at all).
+  const statusOf = typeof options.statusOf === 'function' ? options.statusOf : null;
 
   // Capability guard: never enable against a private interface we do not know.
   // The page cache is the only store we may write through, so its read, write
@@ -534,6 +539,24 @@ export function createCacheRefresh(options = {}) {
     }
   }
 
+  function liveAgentStatus(sessionId) {
+    if (statusOf === null) return 'unknown';
+    try {
+      const value = statusOf(sessionId);
+      return typeof value === 'string' ? value : 'unknown';
+    } catch {
+      return 'unknown';
+    }
+  }
+
+  // Only a confirmed running Agent blocks the build; idle, unknown and a
+  // failed reader keep the previous behavior so environments without an
+  // agents service still refresh.
+  function agentBusy(sessionId) {
+    if (agentStatus.get(sessionId) === 'running') return true;
+    return liveAgentStatus(sessionId) === 'running';
+  }
+
   function noteFailure(error) {
     report.failed += 1;
     failures += 1;
@@ -544,6 +567,23 @@ export function createCacheRefresh(options = {}) {
   async function build(sessionId) {
     if (!active) return;
     report.inFlight = sessionId;
+    // The cancel surface must exist before the first await. A Session disposed
+    // during lookup, settle or stat used to have no controller to abort, so the
+    // build carried on and followed a Session that was already gone.
+    const controller = new AbortController();
+    controllers.add(controller);
+    runningBuilds.set(sessionId, controller);
+    let abortCounted = false;
+    const aborted = () => {
+      if (!controller.signal.aborted) return false;
+      if (!abortCounted) {
+        abortCounted = true;
+        // A timeout is a Host failure counted by noteFailure, not a
+        // cancellation; do not count it twice.
+        if (!controller.fastloadTimedOut) report.aborted += 1;
+      }
+      return true;
+    };
     try {
       let probe = null;
       try {
@@ -553,6 +593,7 @@ export function createCacheRefresh(options = {}) {
         return;
       }
       if (!active) return;
+      if (aborted()) return;
       if (!probe || probe.hit) {
         report.skippedCached += 1;
         return;
@@ -569,7 +610,7 @@ export function createCacheRefresh(options = {}) {
         report.skippedSameRevision += 1;
         return;
       }
-      if (agentStatus.get(sessionId) === 'running') {
+      if (agentBusy(sessionId)) {
         report.skippedRunning += 1;
         schedule(sessionId, timings.idleMs);
         return;
@@ -578,8 +619,18 @@ export function createCacheRefresh(options = {}) {
       // Wait out the writer's live-event batch before trusting the revision.
       await sleep(timings.settleMs);
       if (!active) return;
+      // A dispose aborts the controller; a running Agent does too. Check the
+      // Agent first so an event-driven abort is still reported as "skipped
+      // running" rather than as a cancellation.
+      if (agentBusy(sessionId)) {
+        report.skippedRunning += 1;
+        schedule(sessionId, timings.idleMs);
+        return;
+      }
+      if (aborted()) return;
       const settled = await statRevision(sessionId);
       if (!active) return;
+      if (aborted()) return;
       if (settled === null) {
         noteFailure('session persistence stat failed');
         return;
@@ -591,18 +642,13 @@ export function createCacheRefresh(options = {}) {
       }
 
       // The Agent can start during the settle wait or the stat above; the
-      // earlier check predates both. Re-check before creating a controller or
-      // following, because noteAgentStatus cannot find a controller until it
-      // is registered and would let a running Session be followed.
-      if (agentStatus.get(sessionId) === 'running') {
+      // earlier checks predate both. Re-query the live state before following.
+      if (agentBusy(sessionId)) {
         report.skippedRunning += 1;
         schedule(sessionId, timings.idleMs);
         return;
       }
 
-      const controller = new AbortController();
-      controllers.add(controller);
-      runningBuilds.set(sessionId, controller);
       let frame = null;
       try {
         frame = await readOpening(sessionId, controller);
@@ -611,15 +657,9 @@ export function createCacheRefresh(options = {}) {
         // once below; a timeout is a Host problem and counts as a failure.
         if (error && error.code === 'REFRESH_TIMEOUT') noteFailure(error);
         else if (!controller.signal.aborted) noteFailure(error);
-      } finally {
-        controllers.delete(controller);
-        if (runningBuilds.get(sessionId) === controller) runningBuilds.delete(sessionId);
       }
       if (!active) return;
-      if (controller.signal.aborted) {
-        if (!controller.fastloadTimedOut) report.aborted += 1;
-        return;
-      }
+      if (aborted()) return;
       if (!frame || frame.type !== 'snapshot' || !Array.isArray(frame.records) || frame.records.length === 0) {
         report.skippedEmpty += 1;
         return;
@@ -632,6 +672,7 @@ export function createCacheRefresh(options = {}) {
       // Second revision check: the page must belong to the log it is keyed on.
       const after = await statRevision(sessionId);
       if (!active) return;
+      if (aborted()) return;
       if (after === null) {
         noteFailure('session persistence stat failed after build');
         return;
@@ -641,6 +682,9 @@ export function createCacheRefresh(options = {}) {
         schedule(sessionId, timings.idleMs);
         return;
       }
+      // Never publish a page for a build that was cancelled during the final
+      // stat; store/flush keeps the existing durable-then-count order.
+      if (aborted()) return;
 
       try {
         cache.store(sessionId, revision, key, frame);
@@ -668,6 +712,8 @@ export function createCacheRefresh(options = {}) {
     } catch (error) {
       if (active) noteFailure(error);
     } finally {
+      controllers.delete(controller);
+      if (runningBuilds.get(sessionId) === controller) runningBuilds.delete(sessionId);
       if (report.inFlight === sessionId) report.inFlight = null;
     }
   }

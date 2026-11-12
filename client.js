@@ -734,6 +734,23 @@ const INSTRUMENT = DIAG && DEBUG;
                 return null;
               }
             };
+            // The selection signal alone cannot cancel the restore wait: the
+            // native restore is only observable through the live main
+            // reference, so a workspace without a readable
+            // mainReference.sessionId would leave mainSessionId() null forever
+            // and the prewarm would race the real open instead of yielding to
+            // it. Treat a missing, non-object or throwing reference as
+            // unavailable.
+            const hasMainReference = (service) => {
+              try {
+                const reference = service && service.mainReference;
+                return reference !== null
+                  && typeof reference === 'object'
+                  && typeof reference.sessionId === 'string';
+              } catch {
+                return false;
+              }
+            };
             const stopRestoreWatch = () => {
               if (restoreWatch !== null) {
                 try {
@@ -1371,6 +1388,13 @@ const INSTRUMENT = DIAG && DEBUG;
                 && service.selection
                 && typeof service.selection.subscribe === 'function'
                 && typeof service.selection.getSnapshot === 'function') {
+                if (!hasMainReference(service)) {
+                  // Without the live main reference the restore can never
+                  // cancel this stage, so a follow here would build the same
+                  // page a second time next to the real open.
+                  finishRestorePrewarm('skipped', 'main-reference-unavailable');
+                  return;
+                }
                 if (mainSessionId() === restorePrewarm.sid) {
                   finishRestorePrewarm('skipped', 'already-open');
                   return;

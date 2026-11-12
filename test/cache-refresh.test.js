@@ -147,6 +147,7 @@ function make(options = {}) {
     timers: clock.timers,
     probeLoad: options.probeLoad || (async () => 0),
     now: () => 0,
+    statusOf: options.statusOf,
   });
   return { refresh, cache, state, persistence, follows, logs, clock };
 }
@@ -697,6 +698,114 @@ test('re-checks Agent status after the settle wait', async () => {
 
     assert.equal(t.follows.length, 0, 'a Session that started running during the wait is not followed');
     assert.ok(t.refresh.report.skippedRunning >= 1);
+  } finally {
+    t.refresh.dispose();
+  }
+});
+
+test('a dispose during the page lookup cancels the build before it follows or stores', async () => {
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let lookupStarted = false;
+  const t = make();
+  const lookup = t.cache.lookup;
+  t.cache.lookup = async function (sessionId, variant) {
+    lookupStarted = true;
+    await gate;
+    return lookup.call(this, sessionId, variant);
+  };
+  try {
+    t.refresh.noteActivity('session-a');
+    await t.clock.fireNext();
+    await waitFor(() => lookupStarted);
+    t.refresh.noteDisposed('session-a');
+    release();
+    await waitFor(() => t.refresh.report.inFlight === null);
+
+    assert.equal(t.follows.length, 0, 'a build disposed before the opening read never follows');
+    assert.equal(t.state.calls.store, 0, 'a disposed build never publishes');
+    assert.equal(t.refresh.report.built, 0);
+    assert.equal(t.refresh.report.aborted, 1);
+  } finally {
+    if (release) release();
+    t.refresh.dispose();
+  }
+});
+
+test('a dispose during the settle wait cancels the build before it follows', async () => {
+  const t = make({ timings: { settleMs: 10 } });
+  try {
+    t.refresh.noteActivity('session-a');
+    await t.clock.fireNext();
+    await waitFor(() => t.refresh.report.inFlight === 'session-a');
+    await waitFor(() => t.clock.pending() === 1);
+    t.refresh.noteDisposed('session-a');
+    await t.clock.run(6);
+
+    assert.equal(t.follows.length, 0, 'a build disposed during the settle wait never follows');
+    assert.equal(t.state.calls.store, 0);
+    assert.equal(t.refresh.report.aborted, 1);
+    assert.equal(t.refresh.report.inFlight, null);
+  } finally {
+    t.refresh.dispose();
+  }
+});
+
+test('reads the live Agent state when the event map is empty', async () => {
+  const seen = [];
+  const t = make({
+    statusOf(sessionId) {
+      seen.push(sessionId);
+      return 'running';
+    },
+  });
+  try {
+    t.refresh.noteActivity('session-a');
+    await t.clock.run(2);
+
+    assert.equal(t.follows.length, 0, 'a live running Agent is not followed');
+    assert.equal(t.state.calls.store, 0);
+    assert.ok(t.refresh.report.skippedRunning >= 1);
+    assert.deepEqual(seen.slice(0, 1), ['session-a']);
+  } finally {
+    t.refresh.dispose();
+  }
+});
+
+test('an idle live Agent state does not block the build', async () => {
+  const t = make({ statusOf: () => 'idle' });
+  try {
+    t.refresh.noteActivity('session-a');
+    await t.clock.run();
+
+    assert.equal(t.state.calls.store, 1);
+    assert.equal(t.follows.length, 1);
+    assert.equal(t.refresh.report.skippedRunning, 0);
+  } finally {
+    t.refresh.dispose();
+  }
+});
+
+test('re-checks the live Agent state after the settle wait', async () => {
+  let calls = 0;
+  const t = make({
+    timings: { settleMs: 10 },
+    statusOf() {
+      calls += 1;
+      return calls >= 2 ? 'running' : 'idle';
+    },
+  });
+  try {
+    t.refresh.noteActivity('session-a');
+    await t.clock.fireNext();
+    await waitFor(() => t.refresh.report.inFlight === 'session-a');
+    await waitFor(() => t.clock.pending() === 1);
+    await t.clock.run(6);
+
+    assert.equal(t.follows.length, 0, 'an Agent that started during the settle wait is not followed');
+    assert.equal(t.state.calls.store, 0);
+    assert.ok(t.refresh.report.skippedRunning >= 1);
+    assert.ok(calls >= 2, 'the live state is queried again after the settle wait');
   } finally {
     t.refresh.dispose();
   }

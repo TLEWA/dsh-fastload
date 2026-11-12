@@ -848,6 +848,9 @@ export function apply(ctx, options) {
             tag(request) {
               request[REFRESH_REQUEST] = true;
             },
+            // The idle path must see an Agent that was already running when
+            // this plugin loaded, not only later agent/status events.
+            statusOf: agentStatusReader(ctx, c),
             log: serveLog,
             logger: ctx.logger,
             debug: config.debug,
