@@ -386,6 +386,20 @@ permanent 在 long 上首行 Long Task 从 142.5 降到 118.5 ms，但稳定后�
 4. 开关打开时补一次禁用/热重载回归，确认 `entry.component` 还原。
 5. progressive 不再投入；除非重做分片为“每帧最多一次 React 提交 + 可中断优先级”，否则 rail 场景无法达标。
 
+### 12.1 提交前最终验证
+
+在删除临时诊断字段（`liveRef`、额外透传 prop）之后，重新跑了测试、gate 和真实浏览器冒烟：
+
+- `npm test`：128/128 pass（`node --test`）。
+- `dsh-ci-gate`：PASS，16 ok / 0 warn / 0 fail / 2 skip；tarball 31 files / 176 KiB。
+- 真实浏览器冒烟（headless Chrome 157，DSH 0.2.2-rc.1，host 11031，home-s4，开关只开 permanent）：
+  - long 初始 `lazy=28`、`nodes=74`、`hidden=57`、`scrollHeight=20624`，`errors=[]`；
+  - 点可见 turn-process 展开后 `lazy=0`、`hidden=2`、`aria=true`、`scrollHeight=20664`，原生节点重新出现，可选中文本；
+  - 再折叠回 `lazy=28`、`hidden=57`、`scrollHeight=20624`；
+  - 切到 normal 得到 `lazy=85`、`nodes=195`，切回 long 仍是 `lazy=28`、`nodes=74`；
+  - 加载更早后 `nodes=205`、`groups=5`、`lazy=89`，所选锚点的 viewport top 保持 582，`errors=[]`。
+- 这一轮只验证“清理后仍可运行”，不替代第 6 节的像素等价与第 8 节的 progressive 反证。
+
 ## 附录：证据与复现
 
 - A/B：`bench/.s4-out/ab-prod-normal/{rows.json,summary.json}`、`bench/.s4-out/ab-prod-long/{rows.json,summary.json}`；
