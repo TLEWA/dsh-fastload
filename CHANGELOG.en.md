@@ -5,7 +5,7 @@ All notable changes are documented here. Versions follow
 
 [简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md)
 
-## [Unreleased]
+## [0.3.2] - 2026-11-12
 
 ### Fixed
 
@@ -23,7 +23,7 @@ All notable changes are documented here. Versions follow
 
 ### Added
 
-- **Deferred live build is now on by default (stage 8 follow-up, not released).**
+- **Deferred live build is now on by default (stage 8 follow-up).**
   `DSH_FASTLOAD_DEFER_LIVE_BUILD` now defaults to `1`; `0`/`off`/`no` still turn it off. A real click in DSH 0.2.2-rc.1 opens with `activate=true`, so the click path
   never defers and shows no measurable benefit; only passive `activate:false` requests such
   as prewarm or restore wait for at most 16 ms. Set `DSH_FASTLOAD_DEFER_LIVE_BUILD=0` to
@@ -58,11 +58,11 @@ All notable changes are documented here. Versions follow
   tasks of 69-110 ms versus stock's single 781 ms task. Under the background-long-task rule it
   is **NO-GO**, kept only as a control.
 
-- **Stage 8 final integration, regression and release preparation (local branch, not
-  released).** Merged the stage 2+3+6 integration head with the stage 5 deferred live build,
+- **Stage 8 final integration, regression and release preparation.** Merged the stage 2+3+6 integration head with the stage 5 deferred live build,
   the stage 0 baseline and the stage 4 CSS NO-GO report as `feat/optimization-final`. Of the
-  13 executable regression scenarios, 12 passed, 0 failed and 1 was not executed (a
-  subagent-origin session has no workspace row, so the sidebar cannot reach it). The
+  16-item regression matrix, 12 passed, 0 failed, 4 were not executed at all and 2 were
+  partially covered (a subagent-origin session has no workspace row, so the sidebar cannot
+  reach it; the remaining unexecuted items are in the report). The
   cache-hit path ran 10 opens per sample on the same isolated fixture with DSH 0.2.2-rc.1,
   comparing "all switches off" and "all switches on" against the stage 0 stock numbers.
   Stage 7's 7A client-validation work and 7B private tail reader are **not implemented**
