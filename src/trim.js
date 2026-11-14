@@ -12,6 +12,17 @@ function byteLength(value) {
   return json === undefined ? 0 : Buffer.byteLength(json, 'utf8');
 }
 
+const MESSAGE_TYPES = new Set(['user/message', 'assistant/message']);
+
+function findMessageStarts(records) {
+  const starts = [];
+  for (let i = 0; i < records.length; i += 1) {
+    const event = eventOf(records[i]);
+    if (event && MESSAGE_TYPES.has(event.type)) starts.push(i);
+  }
+  return starts;
+}
+
 function findTurnStarts(records) {
   const starts = [];
   for (let i = 0; i < records.length; i += 1) {
@@ -19,6 +30,102 @@ function findTurnStarts(records) {
     if (event && event.type === TURN_START) starts.push(i);
   }
   return starts;
+}
+
+function suffixSizes(sizes) {
+  const suffix = new Array(sizes.length + 1).fill(0);
+  for (let i = sizes.length - 1; i >= 0; i -= 1) suffix[i] = suffix[i + 1] + sizes[i];
+  return suffix;
+}
+
+/**
+ * Cut the page at a *message* boundary instead of a turn boundary.
+ *
+ * A message count bounds how many messages a page starts with, not how many
+ * bytes they carry: each message drags the tool/job events that happened after
+ * it, and one large tool result can dominate the page. During streaming that
+ * makes a 24-message window grow to hundreds of KiB. This plan keeps the newest
+ * `minMessages` message groups and cuts older history at a message start,
+ * which is the same shape a native paged window has when the Host cuts inside
+ * a turn.
+ *
+ * @returns {{opening: object, info: null | object}}
+ */
+function planMessageTrim(opening, options, maxBytes) {
+  const unchanged = { opening, info: null };
+  const records = opening.records;
+  const sizes = records.map(byteLength);
+  const suffix = suffixSizes(sizes);
+  const total = suffix[0];
+  if (total <= maxBytes) return unchanged;
+
+  const starts = findMessageStarts(records);
+  if (starts.length === 0) return unchanged;
+
+  const minMessages = Math.max(1, Number(options.minMessages) || 1);
+  const floorCount = Math.min(minMessages, starts.length);
+  // Index of the oldest protected message: a cut at or before it keeps at
+  // least `minMessages` message groups in the window.
+  const floorIndex = starts[starts.length - floorCount];
+  const hardCapBytes = Math.max(
+    maxBytes,
+    Number(options.hardCapBytes) || 8 * 1024 * 1024
+  );
+  const budget = Math.floor(maxBytes * 0.97);
+
+  let cutIndex = -1;
+  for (const index of starts) {
+    if (index <= 0 || index > floorIndex) continue;
+    if (suffix[index] <= budget) {
+      cutIndex = index;
+      break;
+    }
+  }
+  // The protected newest messages alone are over the soft budget: keep them
+  // while they still fit the hard cap, otherwise fall through to a cut that
+  // does fit (accuracy of the tail is worth less than a bounded page).
+  if (cutIndex < 0 && suffix[floorIndex] <= hardCapBytes) cutIndex = floorIndex;
+  if (cutIndex < 0) {
+    for (const index of starts) {
+      if (index <= floorIndex) continue;
+      if (suffix[index] <= hardCapBytes) {
+        cutIndex = index;
+        break;
+      }
+    }
+  }
+  if (cutIndex <= 0) return unchanged;
+
+  const protectSeq = Number(options.protectSeq);
+  if (Number.isFinite(protectSeq)) {
+    let protectIndex = -1;
+    for (const index of starts) {
+      const event = eventOf(records[index]);
+      const seq = event && typeof event.seq === 'number' ? event.seq : null;
+      if (seq !== null && seq <= protectSeq) protectIndex = index;
+    }
+    if (protectIndex > 0 && cutIndex > protectIndex) {
+      if (suffix[protectIndex] > hardCapBytes) return unchanged;
+      cutIndex = protectIndex;
+    }
+  }
+
+  const cutEvent = eventOf(records[cutIndex]);
+  return {
+    opening: { ...opening, records: records.slice(cutIndex), hasMore: true },
+    info: {
+      cutAt: 'message',
+      beforeBytes: total,
+      afterBytes: suffix[cutIndex],
+      beforeRecords: records.length,
+      afterRecords: records.length - cutIndex,
+      cutIndex,
+      cutSeq: cutEvent && typeof cutEvent.seq === 'number' ? cutEvent.seq : null,
+      protectedIndex: floorIndex,
+      maxBytes,
+      hardCapBytes,
+    },
+  };
 }
 
 /**
@@ -44,6 +151,9 @@ export function planTrim(opening, options = {}) {
 
   const maxBytes = Number(options.maxBytes) || 0;
   if (maxBytes <= 0) return unchanged;
+  // Message-aligned cutting bounds a running page by bytes; turn-aligned
+  // cutting stays the default everywhere else.
+  if (options.cutAtMessages === true) return planMessageTrim(opening, options, maxBytes);
 
   const sizes = records.map(byteLength);
   const total = sizes.reduce((sum, size) => sum + size, 0);
@@ -60,10 +170,7 @@ export function planTrim(opening, options = {}) {
   const protectedIndex = starts[starts.length - minTurns];
   if (protectedIndex <= 0) return unchanged;
 
-  const suffix = new Array(records.length + 1).fill(0);
-  for (let i = records.length - 1; i >= 0; i -= 1) {
-    suffix[i] = suffix[i + 1] + sizes[i];
-  }
+  const suffix = suffixSizes(sizes);
 
   const budget = Math.floor(maxBytes * 0.97);
   let cutIndex = -1;

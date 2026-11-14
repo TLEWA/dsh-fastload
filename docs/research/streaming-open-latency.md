@@ -75,10 +75,10 @@ stage 9（本 PR）处理 1 和 2：Agent 处于 `running` 时把初始页窗口
 也就解释了为什么“100 条消息”的页会达到 3.5 MB：一条消息平均 ~32 KB，
 而字节预算是关的（`DSH_FASTLOAD_MAX_BYTES=0`）。
 
-**为什么不能靠现有的字节裁剪兜底：** `src/trim.js` 只在 `turn/start` 切，且要求
-`starts.length >= minTurns`（默认 2）。这个会话只有一个 turn，`planTrim` 直接
-返回 unchanged，`maxBytes` 即使打开也不会生效。另外 `planTrim` 现在为了算总量会对
-整页 `JSON.stringify`，真开起来每次首帧还要多付 10–20 ms 宿主开销。
+**为什么不能靠现有的字节裁剪兜底：** `src/trim.js` 只在 `turn/start` 切，且整 turn
+保留；对一个很长、工具密集的 turn，打开 `maxBytes` 也切不动它（默认 `maxBytes=0`，
+本来就不生效）。另外 `planTrim` 现在为了算总量会对整页 `JSON.stringify`，真开起来
+每次首帧还要多付 10–20 ms 宿主开销。
 
 ## 证据 3：页缓存对流式打开结构性失效
 

@@ -6,6 +6,11 @@ export const DEFAULTS = Object.freeze({
   // 100-message page into megabytes of records, so the running window is much
   // smaller and is refilled by the built-in "load older" pager.
   runningMaxMessages: 24,
+  // The Host pager can only cut at turn boundaries, so a single long turn
+  // still returns megabytes even with the small running window. This budget is
+  // enforced by the plugin itself, at message boundaries, on the initial page.
+  runningMaxBytes: 256 * 1024,
+  runningMinMessages: 4,
   minMessages: 40,
   minTurns: 2,
   maxBytes: 0,
@@ -56,12 +61,30 @@ export function readConfig(env = process.env) {
     maxMessages,
     readInt(env, 'DSH_FASTLOAD_RUNNING_MAX_MESSAGES', DEFAULTS.runningMaxMessages, 1, 10_000)
   );
+  const runningMaxBytesRaw = readInt(
+    env,
+    'DSH_FASTLOAD_RUNNING_MAX_BYTES',
+    DEFAULTS.runningMaxBytes,
+    0,
+    64 * 1024 * 1024
+  );
 
   return {
     enabled: readBool(env, 'DSH_FASTLOAD_ENABLED', DEFAULTS.enabled),
     force: readBool(env, 'DSH_FASTLOAD_FORCE', DEFAULTS.force),
     maxMessages,
     runningMaxMessages,
+    // A tiny nonzero budget would cut the page down to a single row and pay
+    // the trim cost for nothing, so the floor is the same 32 KiB the idle
+    // budget uses for its own minimum.
+    runningMaxBytes: runningMaxBytesRaw > 0 ? Math.max(runningMaxBytesRaw, 32 * 1024) : 0,
+    runningMinMessages: readInt(
+      env,
+      'DSH_FASTLOAD_RUNNING_MIN_MESSAGES',
+      DEFAULTS.runningMinMessages,
+      1,
+      1_000
+    ),
     minMessages,
     minTurns: readInt(env, 'DSH_FASTLOAD_MIN_TURNS', DEFAULTS.minTurns, 1, 100),
     maxBytes: maxBytesRaw > 0 ? Math.max(maxBytesRaw, 64 * 1024) : 0,
