@@ -1001,6 +1001,121 @@ test('a running Session never widens a MAX_MESSAGES cap below the running window
   }
 });
 
+function bigRunningPage() {
+  const records = [
+    rec(1, 'turn/start'),
+    rec(2, 'user/message', { message: { content: 'q' } }),
+  ];
+  let seq = 3;
+  for (let i = 0; i < 12; i += 1) {
+    records.push(
+      rec(seq++, 'assistant/message', {
+        message: { content: 'a'.repeat(4000) },
+        sourceEventSeqs: [seq - 1],
+      })
+    );
+    records.push(rec(seq++, 'tool/result', { result: { content: 'y'.repeat(4000) } }));
+  }
+  return {
+    type: 'snapshot',
+    cursor: seq - 1,
+    hasMore: true,
+    assistantStream: { revision: 3 },
+    records,
+  };
+}
+
+test('a running page is byte-bounded inside a single turn', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-running-bytes-'));
+  const persistence = { stat: async () => ({ revision: 'rev-bytes' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+        DSH_FASTLOAD_RUNNING_MAX_BYTES: '32768',
+      },
+      async () => {
+        const harness = makeContext({
+          services: {
+            sessionPersistence: persistence,
+            agents: { get: () => ({ status: 'running' }) },
+          },
+        });
+        const { ctx, sc } = harness;
+        let page;
+        sc.follow = async function* (request) {
+          this.calls.push(request);
+          page = bigRunningPage();
+          yield page;
+        };
+        apply(ctx);
+
+        const first = await sc
+          .follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-bytes' } })
+          .next();
+        assert.ok(first.value, 'the open yielded a page');
+        assert.ok(
+          first.value.records.length < page.records.length,
+          'the running page was cut inside the turn'
+        );
+        assert.equal(first.value.hasMore, true);
+        assert.equal(first.value.records[0].type, 'event');
+        assert.equal(first.value.records[0].event.type, 'assistant/message');
+        harness.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('an idle page keeps the whole single-turn history when no budget is set', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-bytes-'));
+  const persistence = { stat: async () => ({ revision: 'rev-idle' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '0',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+        DSH_FASTLOAD_RUNNING_MAX_BYTES: '32768',
+      },
+      async () => {
+        const harness = makeContext({
+          services: {
+            sessionPersistence: persistence,
+            agents: { get: () => ({ status: 'idle' }) },
+          },
+        });
+        const { ctx, sc } = harness;
+        let page;
+        sc.follow = async function* () {
+          page = bigRunningPage();
+          yield page;
+        };
+        apply(ctx);
+
+        const first = await sc
+          .follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-idle-bytes' } })
+          .next();
+        assert.equal(
+          first.value.records.length,
+          page.records.length,
+          'the running byte budget never touches an idle page'
+        );
+        harness.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+
 test('a running Session opens the small window and skips the page cache', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-running-'));
   const persistence = { stat: async () => ({ revision: 'rev-running' }), open: async () => ({}) };

@@ -13,11 +13,18 @@ All notable changes are documented here. Versions follow
   default 24).** When the Agent is `running`, the initial page request is rewritten to 24
   messages with `turnWindow={ minMessages: min(MIN_MESSAGES, 24), minTurns: 1 }`; every other
   status and every non-initial page (`beforeSeq`/`throughSeq`) keeps the original window.
-  Measured on one real Session (one turn, 166 assistant messages, 248 PTC dispatch events):
+  Measured on one real Session (166 assistant messages, 248 PTC dispatch events):
   the 100-message window was 912 events / 3.63 MiB, the 24-message window 243 events /
   0.63 MiB (−73% events, −83% bytes). The running window only ever shrinks: its effective value
   is `min(MAX_MESSAGES, RUNNING_MAX_MESSAGES)`, so a `MAX_MESSAGES` cap below 24 narrows the
   streaming page instead of widening it.
+- **A running byte budget (`DSH_FASTLOAD_RUNNING_MAX_BYTES`, default 256 KiB).** A message
+  window bounds messages, not bytes: tool/dispatch events travel with each message, so 24
+  messages can still be a few hundred KiB (measured: 239 records / 451 KiB on the same
+  Session). The streaming page is therefore cut again at **message** boundaries: at least
+  the newest 4 messages (`DSH_FASTLOAD_RUNNING_MIN_MESSAGES`) are kept and the page stays
+  under 256 KiB (141 records / 232 KiB measured); if those messages alone exceed the budget
+  they are kept up to `HARD_CAP_BYTES`. Idle opens are unchanged and keep the turn-aligned trim.
 - **The page cache is skipped while streaming (`DSH_FASTLOAD_RUNNING_PAGE_CACHE`, default
   `0`).** The cache key contains the persistence revision, which moves on every streamed frame,
   and the real first frame's `assistantStream.revision` almost always moves as well, so a hit is

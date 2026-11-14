@@ -496,7 +496,27 @@ function firstVisibleMessageSeq(records) {
   return null;
 }
 
-function wrapFirstSnapshot(result, config, state, ctx, extension) {
+/**
+ * Effective byte budget for a running first page.
+ *
+ * The Host pager cuts only at turn boundaries, so a Session whose visible
+ * history is one long Agent loop cannot be windowed by message count at all:
+ * the whole turn comes back. This budget is applied by the plugin itself at
+ * message boundaries, and it is a shrink of any operator budget, never a widen.
+ */
+function withRunningBudget(config) {
+  const idle = Number(config.maxBytes) > 0 ? Number(config.maxBytes) : Infinity;
+  return {
+    ...config,
+    maxBytes: Math.min(idle, config.runningMaxBytes),
+    minTurns: 1,
+    minMessages: config.runningMinMessages,
+    cutAtMessages: true,
+  };
+}
+
+function wrapFirstSnapshot(result, config, state, ctx, extension, options = {}) {
+  const { running = false, log, sessionId } = options;
   const trimFrame = (frame, protectSeq) => {
     const compacted = planCompact(frame, config);
     if (compacted.info) {
@@ -511,11 +531,21 @@ function wrapFirstSnapshot(result, config, state, ctx, extension) {
         } catch {}
       }
     }
-    const trimOptions = Number.isFinite(protectSeq) ? { ...config, protectSeq } : config;
+    const base = running ? withRunningBudget(config) : config;
+    const trimOptions = Number.isFinite(protectSeq) ? { ...base, protectSeq } : base;
     const { opening, info } = planTrim(compacted.opening, trimOptions);
     if (!info) return opening;
     state.trims += 1;
     state.lastTrim = info;
+    if (running) state.runningTrims = (state.runningTrims || 0) + 1;
+    try {
+      log?.write(
+        'trim sid=' + (sessionId ?? '-') + ' at=' + (info.cutAt || 'turn') +
+          ' bytes=' + info.beforeBytes + '->' + info.afterBytes +
+          ' records=' + info.beforeRecords + '->' + info.afterRecords +
+          ' cut=' + info.cutSeq
+      );
+    } catch {}
     if (config.debug) {
       try {
         ctx.logger?.info?.(
@@ -559,7 +589,7 @@ function wrapFirstSnapshot(result, config, state, ctx, extension) {
   return result;
 }
 
-const STATE_VERSION = '0.2.1';
+const STATE_VERSION = '0.2.2';
 const CORDIS_ORIGINAL = Symbol.for('cordis.original');
 
 /**
@@ -583,6 +613,7 @@ function reuseState() {
     pageCacheHits: 0,
     pageCacheDropped: 0,
     runningOpens: 0,
+    runningTrims: 0,
     rewindExtends: 0,
     idleRefresh: null,
     error: null,
@@ -808,7 +839,11 @@ export function apply(ctx, options) {
 
         const startedAt = config.debug ? process.hrtime.bigint() : 0n;
         const result = original.call(this, next, signal);
-        const wantTrim = config.maxBytes > 0 || config.stripStream;
+        // A running page is byte-bounded by the plugin itself: the Host pager
+        // cannot cut inside a turn, so one long turn would otherwise hand the
+        // renderer megabytes that no message window can shrink.
+        const runningTrim = running && config.runningMaxBytes > 0;
+        const wantTrim = config.maxBytes > 0 || config.stripStream || runningTrim;
         // `next` already carries the narrowed window, so reuse the decision
         // made against the original request instead of re-testing it here.
         const wantExtend = config.rewindAware && initial;
@@ -816,7 +851,11 @@ export function apply(ctx, options) {
           ? { original, thisArg: this, request: next, signal, state, log: serveLog }
           : null;
         const trimmed = initial && (wantTrim || wantExtend)
-          ? wrapFirstSnapshot(result, config, state, ctx, extension)
+          ? wrapFirstSnapshot(result, config, state, ctx, extension, {
+              running: runningTrim,
+              log: serveLog,
+              sessionId: requestSessionId,
+            })
           : result;
         const streamed = config.debug ? observeFirstFrame(trimmed, startedAt) : trimmed;
         const sessionId = initial ? requestSessionId : null;
