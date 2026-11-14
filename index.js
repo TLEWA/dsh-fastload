@@ -372,7 +372,12 @@ function wrapPageCache(result, options) {
                 }
                 throw new Error('fastload page cache is stale: baseline moved ' + realRevision + '/' + cachedRevision);
               }
-              if (probe && probe.revision) {
+              // A baseline with an active attempt is still growing: a page
+              // stored from it is invalidated by the next chunk, so the next
+              // open serves a doomed page and resyncs from scratch.
+              const baselineActive =
+                frame.assistantStream != null && frame.assistantStream.activeAttempt != null;
+              if (probe && probe.revision && !baselineActive) {
                 cache.store(sessionId, probe.revision, probe.key, frame);
                 log?.write(
                   'store sid=' + sessionId + ' records=' +
@@ -577,6 +582,7 @@ function reuseState() {
     lastCompact: null,
     pageCacheHits: 0,
     pageCacheDropped: 0,
+    runningOpens: 0,
     rewindExtends: 0,
     idleRefresh: null,
     error: null,
@@ -608,6 +614,9 @@ export function apply(ctx, options) {
   state.config = config;
   state.installed = false;
   state.error = null;
+  // The diagnostics object is reused across installs of the same version, so a
+  // counter added in a later build can be missing on a hot reload.
+  if (!Number.isFinite(state.runningOpens)) state.runningOpens = 0;
 
   if (!config.enabled) return;
 
@@ -617,6 +626,8 @@ export function apply(ctx, options) {
     ', maxBytes=' + config.maxBytes +
     ', client auto-fill=on, scan cache=' + (config.scanCache ? 'on' : 'off') +
     ', page cache=' + (config.pageCache ? 'on' : 'off') +
+    ', running page=' + config.runningMaxMessages +
+    (config.runningPageCache ? ' (cached)' : ' (no cache)') +
     ', rewind=' + (config.rewindAware ? 'aware' : 'plain') +
     ', replay streams=' + (config.stripStream ? 'stripped' : 'kept') +
     ', idle refresh=' + (config.idleCacheRefresh ? 'on' : 'off') +
@@ -730,6 +741,14 @@ export function apply(ctx, options) {
       // wrapper into a passthrough instead of leaving the old page size in the
       // chain and re-applying it after the next install.
       let active = true;
+      // One status source for the deferred live build and the running-page
+      // policy: the same capability-checked reader, replaceable once through
+      // the test seam. A reader that throws leaves the session 'unknown'.
+      const statusOf = options && typeof options.statusOf === 'function'
+        ? options.statusOf
+        : options && options.defer && typeof options.defer.statusOf === 'function'
+          ? options.defer.statusOf
+          : agentStatusReader(ctx, c);
       // Stage 5: opt-in, cancellable yield before the live build. Constructed
       // per installation so its pending timers die with the wrapper.
       let liveBuildDefer = null;
@@ -744,9 +763,7 @@ export function apply(ctx, options) {
             : undefined,
           timers: deferOptions ? deferOptions.timers : undefined,
           now: deferOptions ? deferOptions.now : undefined,
-          statusOf: deferOptions && typeof deferOptions.statusOf === 'function'
-            ? deferOptions.statusOf
-            : agentStatusReader(ctx, c),
+          statusOf,
           log: serveLog,
         });
         state.deferLiveBuild = liveBuildDefer.report();
@@ -763,12 +780,30 @@ export function apply(ctx, options) {
         const requestSessionId = sessionIdOf(next);
         if (liveBuildDefer && !refreshing && requestSessionId) liveBuildDefer.arrive(requestSessionId);
 
+        // A running Session is opened to watch the tail: a 100-message page of
+        // a tool-heavy turn is megabytes of records the renderer must assemble
+        // before the first row appears, so ask the Host for a much smaller
+        // window. 'unknown' means "cannot tell" and keeps the idle policy: a
+        // page is never shrunk on a guess. Internal refresh builds keep the
+        // canonical window so the page they warm matches their cache variant.
+        let running = false;
+        if (initial && requestSessionId && !refreshing) {
+          try {
+            running = statusOf(requestSessionId) === 'running';
+          } catch {
+            running = false;
+          }
+        }
+        if (running) state.runningOpens += 1;
+
         if (initial) {
-          next.maxMessages = config.maxMessages;
-          next.turnWindow = {
-            minMessages: config.minMessages,
-            minTurns: config.minTurns,
-          };
+          next.maxMessages = running ? config.runningMaxMessages : config.maxMessages;
+          next.turnWindow = running
+            ? { minMessages: Math.min(config.minMessages, next.maxMessages), minTurns: 1 }
+            : {
+                minMessages: config.minMessages,
+                minTurns: config.minTurns,
+              };
         }
 
         const startedAt = config.debug ? process.hrtime.bigint() : 0n;
@@ -793,7 +828,12 @@ export function apply(ctx, options) {
                 ' max=' + (next.maxMessages ?? '-') + ' turns=' +
                 (next.turnWindow ? next.turnWindow.minMessages + '/' + next.turnWindow.minTurns : '-') +
                 ' stream=' + (next.assistantStream === true ? 'on' : 'off') +
-                ' activate=' + (next.activate === true ? 'true' : 'false')
+                ' activate=' + (next.activate === true ? 'true' : 'false') +
+                ' mode=' + (running ? 'running' : 'idle') +
+                ' cache=' +
+                (initial && pageCache && sessionId && !refreshing && !(running && !config.runningPageCache)
+                  ? 'on'
+                  : 'off')
             );
           } catch {}
         }
@@ -801,6 +841,10 @@ export function apply(ctx, options) {
         // must be the one the refresher verifies; serving it from the cache
         // here would both skip that build and count a phantom hit.
         if (!initial || !pageCache || !sessionId || refreshing) return streamed;
+        // A live baseline moves with every stream frame, so a page written or
+        // served while the Agent runs is stale on arrival or races the next
+        // chunk. Skip the cache for the running window unless opted back in.
+        if (running && !config.runningPageCache) return streamed;
         return wrapPageCache(streamed, {
           cache: pageCache,
           sessionId,

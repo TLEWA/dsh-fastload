@@ -5,6 +5,35 @@ All notable changes are documented here. Versions follow
 
 [简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md)
 
+## [Unreleased]
+
+### Added
+
+- **A dedicated opening window while a Session streams (`DSH_FASTLOAD_RUNNING_MAX_MESSAGES`,
+  default 24).** When the Agent is `running`, the initial page request is rewritten to 24
+  messages with `turnWindow={ minMessages: min(MIN_MESSAGES, 24), minTurns: 1 }`; every other
+  status and every non-initial page (`beforeSeq`/`throughSeq`) keeps the original window.
+  Measured on one real Session (one turn, 166 assistant messages, 248 PTC dispatch events):
+  the 100-message window was 912 events / 3.63 MiB, the 24-message window 243 events /
+  0.63 MiB (−73% events, −83% bytes). The running window only ever shrinks: its effective value
+  is `min(MAX_MESSAGES, RUNNING_MAX_MESSAGES)`, so a `MAX_MESSAGES` cap below 24 narrows the
+  streaming page instead of widening it.
+- **The page cache is skipped while streaming (`DSH_FASTLOAD_RUNNING_PAGE_CACHE`, default
+  `0`).** The cache key contains the persistence revision, which moves on every streamed frame,
+  and the real first frame's `assistantStream.revision` almost always moves as well, so a hit is
+  dropped and the page reopened in full. Streaming opens no longer read or write the cache.
+
+### Fixed
+
+- **Only settled pages are cached.** A first frame whose `assistantStream` still carries an
+  active attempt is no longer stored: that snapshot is stale on the next chunk. Previously every
+  streaming open wrote a full page that was invalid immediately (201 files / 33 MB in 25 minutes,
+  a single 3.5 MB page rewritten per open).
+- **A streaming Session no longer reopens its page twice.** Each open was either a cache miss or
+  a hit that the next `assistantStream.revision` invalidated a few milliseconds later, after
+  which the client opened the page again from scratch. The running window plus the cache skip
+  removes that double-open path. Diagnosis and numbers: `docs/research/streaming-open-latency.md`.
+
 ## [0.3.2] - 2026-11-12
 
 ### Fixed

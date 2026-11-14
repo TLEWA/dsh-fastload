@@ -290,6 +290,56 @@ hardcodes `activate: true`; a real click therefore never defers, and only passiv
 are available to repeat the measurement; otherwise this is a candidate for removal
 in a later cleanup.
 
+## Running-Session window (stage 9)
+
+Stages 0–8 bounded the initial page by message and turn count and cached it by
+revision. Neither covers the case the user reports: opening a Session whose
+Agent is streaming.
+
+Measured on the real GUI (2026-11-14, DSH 0.2.2-rc.1, `session-0333c160…`: one
+turn, 166 assistant messages, 248 `tool/ptc-dispatch` events):
+
+- The Host's own `follow` is cheap. `serve.log` recorded `open→live` of 20–60 ms
+  for pages of 800–1000 records, so the page build is not the bottleneck.
+- The page payload is large: the 100-message window is 912 records / 3.63 MiB, of
+  which 48.7% of the bytes are `tool/ptc-dispatch`, 25.2% `tool/result` and 14.7%
+  `assistant/message`. One PTC step emits about ten events, so "100 messages"
+  means roughly 1000 events.
+- The byte trim never fires here: `planTrim` cuts only at `turn/start` and keeps
+  `minTurns` turns, and this Session has a single turn, so `starts.length <
+  minTurns` returns the page unchanged.
+- The page cache cannot serve a streaming open. The key contains the persistence
+  revision (moves on every append) and `wrapPageCache` additionally requires the
+  live `assistantStream.revision` to equal the cached one. Over a 25-minute
+  streaming session every open was a miss; the single accidental hit was dropped
+  30 ms later (`baseline moved 666/506`) and the client opened the page again.
+
+PR1 makes two changes:
+
+1. **Running window.** When `statusOf(sessionId) === 'running'`, an initial page
+   is rewritten to `maxMessages = min(maxMessages, runningMaxMessages)` and
+   `turnWindow = { minMessages: min(minMessages, that value), minTurns: 1 }`.
+   The running window is a clamp, never a widen: an operator cap below 24 shrinks
+   the streaming page too. The same
+   Session then yields 243 records / 0.63 MiB (−73% records, −83% bytes).
+   Non-initial pages and every other status keep the canonical window; internal
+   cache-refresh builds are excluded so one cache variant never mixes windows.
+2. **No cache while streaming; only settled pages are stored.** With
+   `runningPageCache = false` a running open neither looks up nor stores. Even
+   when enabled, `store` now skips a frame whose `assistantStream.activeAttempt`
+   is set, because the next chunk invalidates it.
+
+Trade-off: while streaming the window covers the last 24 messages instead of 100;
+older history is still reachable through the built-in "Load older", which the
+plugin passes through untouched. `DSH_FASTLOAD_RUNNING_MAX_MESSAGES=100` restores
+the previous behavior, and `DSH_FASTLOAD_RUNNING_PAGE_CACHE=1` restores caching.
+
+What stage 9 leaves open: the renderer still expands the active attempt into
+`nextIndex` transient entries (measured up to 702) through
+`ConversationAssembler.replaceWindow`, and the first frame still carries all
+0.63 MiB of records. Evidence and follow-up options are in
+`docs/research/streaming-open-latency.md`.
+
 ## CSS content-visibility (stage 4, NO-GO)
 
 Candidate E applied `content-visibility: auto` plus measured `contain-intrinsic-size` to

@@ -2,6 +2,10 @@ export const DEFAULTS = Object.freeze({
   enabled: true,
   force: false,
   maxMessages: 100,
+  // A running Session is opened to watch the tail: a tool-heavy turn turns a
+  // 100-message page into megabytes of records, so the running window is much
+  // smaller and is refilled by the built-in "load older" pager.
+  runningMaxMessages: 24,
   minMessages: 40,
   minTurns: 2,
   maxBytes: 0,
@@ -9,6 +13,10 @@ export const DEFAULTS = Object.freeze({
   scanCache: true,
   stripStream: true,
   pageCache: true,
+  // A page served while the Agent is producing text is invalidated by the next
+  // stream frame. Skipping the cache for the running window avoids writing
+  // doomed pages and dropping them (full resync) on the next open.
+  runningPageCache: false,
   idleCacheRefresh: false,
   deferLiveBuild: true,
   rewindAware: true,
@@ -40,11 +48,20 @@ export function readConfig(env = process.env) {
     maxMessages
   );
   const maxBytesRaw = readInt(env, 'DSH_FASTLOAD_MAX_BYTES', DEFAULTS.maxBytes, 0, 64 * 1024 * 1024);
+  // The running window is a shrink, never a widen: an operator who capped
+  // MAX_MESSAGES below the running default must not see the first page grow
+  // the moment the Agent starts streaming. Clamping here keeps every consumer
+  // (window rewrite, turnWindow, serve.log, diagnostics) on the same value.
+  const runningMaxMessages = Math.min(
+    maxMessages,
+    readInt(env, 'DSH_FASTLOAD_RUNNING_MAX_MESSAGES', DEFAULTS.runningMaxMessages, 1, 10_000)
+  );
 
   return {
     enabled: readBool(env, 'DSH_FASTLOAD_ENABLED', DEFAULTS.enabled),
     force: readBool(env, 'DSH_FASTLOAD_FORCE', DEFAULTS.force),
     maxMessages,
+    runningMaxMessages,
     minMessages,
     minTurns: readInt(env, 'DSH_FASTLOAD_MIN_TURNS', DEFAULTS.minTurns, 1, 100),
     maxBytes: maxBytesRaw > 0 ? Math.max(maxBytesRaw, 64 * 1024) : 0,
@@ -58,6 +75,11 @@ export function readConfig(env = process.env) {
     scanCache: readBool(env, 'DSH_FASTLOAD_SCAN_CACHE', DEFAULTS.scanCache),
     stripStream: readBool(env, 'DSH_FASTLOAD_STRIP_STREAM', DEFAULTS.stripStream),
     pageCache: readBool(env, 'DSH_FASTLOAD_PAGE_CACHE', DEFAULTS.pageCache),
+    runningPageCache: readBool(
+      env,
+      'DSH_FASTLOAD_RUNNING_PAGE_CACHE',
+      DEFAULTS.runningPageCache
+    ),
     idleCacheRefresh: readBool(env, 'DSH_FASTLOAD_IDLE_CACHE_REFRESH', DEFAULTS.idleCacheRefresh),
     deferLiveBuild: readBool(env, 'DSH_FASTLOAD_DEFER_LIVE_BUILD', DEFAULTS.deferLiveBuild),
     pageCacheMaxBytes: readInt(

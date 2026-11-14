@@ -947,3 +947,175 @@ test('releases idle refresh listeners when a later registration throws', async (
     await cleanupDir(dir);
   }
 });
+
+function runningPage() {
+  return {
+    type: 'snapshot',
+    cursor: 2,
+    hasMore: true,
+    assistantStream: { revision: 3 },
+    records: [
+      rec(1, 'turn/start'),
+      rec(2, 'user/message', { message: { content: 'q' } }),
+    ],
+  };
+}
+
+test('a running Session never widens a MAX_MESSAGES cap below the running window', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-running-cap-'));
+  const persistence = { stat: async () => ({ revision: 'rev-cap' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_MAX_MESSAGES: '10',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const harness = makeContext({
+          services: {
+            sessionPersistence: persistence,
+            agents: { get: () => ({ status: 'running' }) },
+          },
+        });
+        const { ctx, sc } = harness;
+        sc.follow = async function* (request) {
+          this.calls.push(request);
+          yield runningPage();
+        };
+        apply(ctx);
+
+        await sc.follow({
+          maxMessages: 500,
+          address: { kind: 'session', sessionId: 'session-cap' },
+        }).next();
+        assert.equal(sc.calls[0].maxMessages, 10, 'the operator cap wins over the 24 default');
+        assert.deepEqual(sc.calls[0].turnWindow, { minMessages: 10, minTurns: 1 });
+        harness.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('a running Session opens the small window and skips the page cache', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-running-'));
+  const persistence = { stat: async () => ({ revision: 'rev-running' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_FORCE: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_DEBUG: '0',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const harness = makeContext({
+          services: {
+            sessionPersistence: persistence,
+            agents: { get: () => ({ status: 'running' }) },
+          },
+        });
+        const { ctx, sc } = harness;
+        sc.follow = async function* (request) {
+          this.calls.push(request);
+          yield runningPage();
+        };
+        apply(ctx);
+
+        const state = globalThis.__DSH_FASTLOAD__;
+        const opens = state.runningOpens;
+        const hits = state.pageCacheHits;
+
+        await sc.follow({
+          maxMessages: 500,
+          address: { kind: 'session', sessionId: 'session-run' },
+        }).next();
+        assert.equal(sc.calls[0].maxMessages, 24);
+        assert.deepEqual(sc.calls[0].turnWindow, { minMessages: 24, minTurns: 1 });
+        assert.equal(state.runningOpens, opens + 1);
+
+        // "Load older" is never narrowed, even while the Agent runs.
+        await sc.follow({
+          maxMessages: 500,
+          beforeSeq: 42,
+          address: { kind: 'session', sessionId: 'session-run' },
+        }).next();
+        assert.equal(sc.calls[1].maxMessages, 500);
+        assert.equal(sc.calls[1].turnWindow, undefined);
+        assert.equal(state.runningOpens, opens + 1);
+
+        await state.pageCache.flush();
+        assert.equal(state.pageCache.stats.writes, 0, 'a running page must not be stored');
+
+        // Nothing was served either: a second open builds again.
+        await sc.follow({
+          maxMessages: 500,
+          address: { kind: 'session', sessionId: 'session-run' },
+        }).next();
+        assert.equal(sc.calls[2].maxMessages, 24);
+        assert.equal(state.pageCacheHits, hits);
+        harness.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('an idle Session keeps the canonical window and still caches its page', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-idle-page-'));
+  const persistence = { stat: async () => ({ revision: 'rev-idle-page' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_FORCE: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '1',
+        DSH_FASTLOAD_DEBUG: '0',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+      },
+      async () => {
+        const harness = makeContext({
+          services: {
+            sessionPersistence: persistence,
+            agents: { get: () => ({ status: 'idle' }) },
+          },
+        });
+        const { ctx, sc } = harness;
+        sc.follow = async function* (request) {
+          this.calls.push(request);
+          yield runningPage();
+        };
+        apply(ctx);
+
+        await sc.follow({
+          maxMessages: 500,
+          address: { kind: 'session', sessionId: 'session-idle-page' },
+        }).next();
+        assert.equal(sc.calls[0].maxMessages, 100);
+        assert.deepEqual(sc.calls[0].turnWindow, { minMessages: 40, minTurns: 2 });
+
+        const state = globalThis.__DSH_FASTLOAD__;
+        await state.pageCache.flush();
+        assert.ok(state.pageCache.stats.writes >= 1, 'an idle page is still cached');
+
+        const hits = state.pageCacheHits;
+        await sc.follow({
+          maxMessages: 500,
+          address: { kind: 'session', sessionId: 'session-idle-page' },
+        }).next();
+        assert.equal(state.pageCacheHits, hits + 1);
+        harness.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});

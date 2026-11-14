@@ -63,7 +63,13 @@ firstAnchor 看起来很快，实际上是一个空页。
   文件大小或 mtime 变了自然失效。
 - 首屏快照缓存：初始页按“会话 revision + 页窗口 + 裁剪配置”落盘（zstd）。
   命中时先发缓存页面，真实 `follow` 仍在后台构建，用 cursor 对齐后续事件；
-  对不齐就丢弃缓存，绝不下发第二个 snapshot。
+  对不齐就丢弃缓存，绝不下发第二个 snapshot。只缓存**稳定页**：首帧还带着
+  进行中的 assistant attempt 时不落盘，因为下一个 chunk 就会让这份快照作废。
+- 运行期小页：Agent 正在输出（`running`）时，初始页窗口收缩到
+  `DSH_FASTLOAD_RUNNING_MAX_MESSAGES`（默认 24）条消息，并默认跳过页缓存
+  （`DSH_FASTLOAD_RUNNING_PAGE_CACHE=0`）。工具密集的 turn 里 100 条消息可以是
+  900 多条事件、数 MB 的首帧；正在输出时用户只看尾部，更早的历史由“加载更早”
+  按原语义补回。turn 结束后的下一次打开自动恢复 100 条窗口。
 - replay stream 剥离：首帧里 `assistant/message.data.stream` 被替换成 `[]`
   （不是删除键，客户端会直接迭代它）。transcript 从 `data.message` 渲染、
   用量从 `data.usage` 读，所以可见内容不变。
@@ -84,6 +90,7 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_ENABLED` | `1` | 设为 `0` 只关闭 Host 端首屏改写与裁剪；Web 端一次后台补齐仍会运行。 |
 | `DSH_FASTLOAD_FORCE` | `0` | 强制改写所有首屏，包括显式的小页。 |
 | `DSH_FASTLOAD_MAX_MESSAGES` | `100` | 首屏消息上限。 |
+| `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Agent 正在输出时的首屏消息上限；只作用于初始页。设为与 `MAX_MESSAGES` 相同即关闭运行期收缩。该值不会超过 `MAX_MESSAGES`：把 `MAX_MESSAGES` 调到 24 以下时会同时压低运行期窗口，而不是把首屏放大。 |
 | `DSH_FASTLOAD_MIN_MESSAGES` | `40` | turnWindow 允许裁切前的最小消息数。 |
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | turnWindow 目标保留的尾部 turn 数；仍受 `maxMessages` 硬上限约束。 |
 | `DSH_FASTLOAD_MAX_BYTES` | `0` | 软字节预算；`0` 表示不按字节裁。 |
@@ -91,6 +98,7 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_SCAN_CACHE` | `1` | 会话头索引与列表 TTL memo；`0` 恢复每次全量读 header。 |
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | 首帧剥离回放用的 `data.stream`。 |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | 持久化首屏快照。 |
+| `DSH_FASTLOAD_RUNNING_PAGE_CACHE` | `0` | Agent 正在输出时是否仍读写页缓存。默认关闭：流式期写入的快照下一个 chunk 就作废，命中后也会被丢弃并整页重开。 |
 | `DSH_FASTLOAD_IDLE_CACHE_REFRESH` | `0` | 空闲时用只读 follow（`activate: false`）预热页缓存；不写 session store、不改原始日志，构建前后校验 `revision`。 |
 | `DSH_FASTLOAD_DEFER_LIVE_BUILD` | `1` | 页缓存命中后把真实 follow 延后最多 16 ms，让缓存首帧先绘制；默认开启。0.2.2-rc.1 的真实点击打开带 `activate=true`，点击路径实际不生效；只影响 `activate:false` 的被动请求（预热/恢复）。设为 `0` 关闭（见 `docs/design.md`）。 |
 | `DSH_FASTLOAD_REWIND_AWARE` | `1` | 初始页被 `/rewind` 全部隐藏时向前扩一页。 |
@@ -99,6 +107,14 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | 页缓存文件数上限。 |
 | `DSH_FASTLOAD_CACHE_DIR` | 空 | 缓存目录；空表示 `$DSH_HOME/cache/dsh-fastload`。 |
 | `DSH_FASTLOAD_DEBUG` | `0` | 每次裁切写一条 DSH 日志。 |
+
+运行期小页只改写初始页（无 `beforeSeq`/`throughSeq`）的请求，并且要求能读到
+Session 的实时 Agent 状态：状态不是 `running`（含查询抛错）时保持 100 条窗口。
+小页的 `turnWindow` 为 `{ minMessages: min(MIN_MESSAGES, RUNNING_MAX_MESSAGES), minTurns: 1 }`，
+即短 turn 整段保留、长 turn 最多 24 条消息。页缓存默认同时跳过，因为缓存键里的
+persistence revision 在流式期每帧都在变，命中后真实首帧的 `assistantStream.revision`
+也几乎必然前进，结果要么未命中、要么命中即丢弃。实测数据见
+`docs/research/streaming-open-latency.md`。
 
 延后默认开启，只有缓存确实命中、请求为初始页（无 `beforeSeq`/`throughSeq`）、
 `activate !== true`、`assistantStream` 没有进行中的 attempt，且能确认 Agent 空闲时才生效。

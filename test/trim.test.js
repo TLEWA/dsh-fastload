@@ -175,3 +175,43 @@ test('ignores a protectSeq that is not in the page', () => {
   });
   assert.notEqual(result.info, null);
 });
+
+test('running page defaults leave the idle page untouched', () => {
+  const config = readConfig({});
+  assert.equal(config.maxMessages, 100);
+  assert.equal(config.minMessages, 40);
+  assert.equal(config.runningMaxMessages, 24);
+  // The running window skips the page cache: a live baseline invalidates it.
+  assert.equal(config.runningPageCache, false);
+});
+
+test('parses and clamps the running page window', () => {
+  assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MAX_MESSAGES: '40' }).runningMaxMessages, 40);
+  // An out-of-range value falls back to the default instead of an empty page.
+  assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MAX_MESSAGES: '0' }).runningMaxMessages, 24);
+  assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MAX_MESSAGES: 'nope' }).runningMaxMessages, 24);
+  // A running page is a shrink, never a widen: a MAX_MESSAGES cap below the
+  // running default must also cap the running window (codex P2 on PR #19).
+  assert.equal(
+    readConfig({ DSH_FASTLOAD_MAX_MESSAGES: '10' }).runningMaxMessages,
+    10
+  );
+  assert.equal(
+    readConfig({ DSH_FASTLOAD_MAX_MESSAGES: '10', DSH_FASTLOAD_RUNNING_MAX_MESSAGES: '40' })
+      .runningMaxMessages,
+    10
+  );
+  assert.equal(
+    readConfig({ DSH_FASTLOAD_MAX_MESSAGES: '10', DSH_FASTLOAD_RUNNING_MAX_MESSAGES: '4' })
+      .runningMaxMessages,
+    4
+  );
+  assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_PAGE_CACHE: '1' }).runningPageCache, true);
+  for (const value of ['0', 'false', 'off', 'no']) {
+    assert.equal(
+      readConfig({ DSH_FASTLOAD_RUNNING_PAGE_CACHE: value }).runningPageCache,
+      false,
+      value
+    );
+  }
+});
