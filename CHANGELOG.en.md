@@ -36,6 +36,13 @@ All notable changes are documented here. Versions follow
   active attempt is no longer stored: that snapshot is stale on the next chunk. Previously every
   streaming open wrote a full page that was invalid immediately (201 files / 33 MB in 25 minutes,
   a single 3.5 MB page rewritten per open).
+- **The message recovered by a rewind is no longer trimmed away when it is record 0.** The
+  running message-aligned cut used to protect only `protectIndex > 0`; when the `/rewind`
+  extension placed the only visible message first in the merged page, the cut removed it again
+  and the first frame was still an empty transcript. Index 0 is now a legal protection point,
+  at the cost of keeping the whole page untrimmed. Regression tests:
+  `message-aligned trim keeps the whole page when message 0 is protected` and
+  `keeps the whole page when the recovered turn is the first one`.
 - **A streaming Session no longer reopens its page twice.** Each open was either a cache miss or
   a hit that the next `assistantStream.revision` invalidated a few milliseconds later, after
   which the client opened the page again from scratch. The running window plus the cache skip

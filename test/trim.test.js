@@ -166,6 +166,22 @@ test('leaves the page alone when the recovered turn cannot fit the hard cap', ()
   assert.equal(result.opening, opening);
 });
 
+test('keeps the whole page when the recovered turn is the first one', () => {
+  // The rewind extension can pull the only visible turn in front of a hidden
+  // tail, making that turn record 0. Index 0 is a legal protection point.
+  const opening = page(8, 2000);
+  const result = planTrim(opening, {
+    maxBytes: 3000,
+    hardCapBytes: 8 * 1024 * 1024,
+    minTurns: 2,
+    protectSeq: opening.records[0].event.seq,
+  });
+
+  assert.equal(result.info, null, 'cutting at index 0 would empty the transcript');
+  assert.equal(result.opening, opening);
+  assert.equal(result.opening.records[0].event.seq, 1);
+});
+
 test('ignores a protectSeq that is not in the page', () => {
   const opening = page(8, 2000);
   const result = planTrim(opening, {
@@ -263,6 +279,28 @@ test('message-aligned trim keeps a rewind-recovered message', () => {
     (record) => record.event.type === 'assistant/message' && record.event.seq === target.event.seq
   );
   assert.equal(kept, true);
+});
+
+test('message-aligned trim keeps the whole page when message 0 is protected', () => {
+  const records = [rec(1, 'assistant/message', { message: { content: 'only visible' } })];
+  let seq = 2;
+  for (let i = 0; i < 40; i += 1) {
+    records.push(
+      rec(seq++, 'assistant/message', { message: { content: 'h'.repeat(4000) } })
+    );
+  }
+  const opening = { type: 'snapshot', records, hasMore: true };
+  const result = planTrim(opening, {
+    maxBytes: 16 * 1024,
+    hardCapBytes: 8 * 1024 * 1024,
+    minMessages: 2,
+    cutAtMessages: true,
+    protectSeq: 1,
+  });
+
+  assert.equal(result.info, null, 'the protected first message must survive the cut');
+  assert.equal(result.opening, opening);
+  assert.equal(result.opening.records[0].event.seq, 1);
 });
 
 test('message-aligned cut still honours the hard cap for the protected tail', () => {

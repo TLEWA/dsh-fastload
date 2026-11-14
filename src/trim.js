@@ -94,8 +94,6 @@ function planMessageTrim(opening, options, maxBytes) {
       }
     }
   }
-  if (cutIndex <= 0) return unchanged;
-
   const protectSeq = Number(options.protectSeq);
   if (Number.isFinite(protectSeq)) {
     let protectIndex = -1;
@@ -104,11 +102,18 @@ function planMessageTrim(opening, options, maxBytes) {
       const seq = event && typeof event.seq === 'number' ? event.seq : null;
       if (seq !== null && seq <= protectSeq) protectIndex = index;
     }
-    if (protectIndex > 0 && cutIndex > protectIndex) {
+    // A recovered message may be the very first record of the merged page; it
+    // is still the only visible content the client can render, so index 0 must
+    // be protected too. Cutting there keeps the whole page (cutIndex === 0),
+    // which is what the caller gets back instead of an empty transcript.
+    if (protectIndex >= 0 && cutIndex > protectIndex) {
       if (suffix[protectIndex] > hardCapBytes) return unchanged;
       cutIndex = protectIndex;
     }
   }
+  // Protecting index 0 means the whole page has to be kept: there is no cut
+  // point left that preserves the recovered visible message.
+  if (cutIndex <= 0) return unchanged;
 
   const cutEvent = eventOf(records[cutIndex]);
   return {
@@ -201,7 +206,7 @@ export function planTrim(opening, options = {}) {
       const seq = event && typeof event.seq === 'number' ? event.seq : null;
       if (seq !== null && seq <= protectSeq) protectIndex = index;
     }
-    if (protectIndex > 0 && cutIndex > protectIndex) {
+    if (protectIndex >= 0 && cutIndex > protectIndex) {
       if (suffix[protectIndex] > hardCapBytes) return unchanged;
       cutIndex = protectIndex;
     }
