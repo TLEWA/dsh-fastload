@@ -100,3 +100,44 @@ test('closing after the cached frame stops the debug lag probe', async () => {
     globalThis.setImmediate = realSetImmediate;
   }
 });
+
+function cacheMiss() {
+  const calls = { stored: [] };
+  return {
+    calls,
+    lookup: async () => ({ hit: false, key: 'key', revision: 1 }),
+    evict() {},
+    store: (...args) => calls.stored.push(args),
+  };
+}
+
+test('a growing assistant baseline is never written to the cache', async () => {
+  const cache = cacheMiss();
+  const frame = {
+    type: 'snapshot',
+    cursor: 5,
+    records: [record(5)],
+    hasMore: false,
+    assistantStream: { revision: 7, activeAttempt: { attemptId: 'a', nextIndex: 3 } },
+  };
+  await collect(
+    wrapPageCache(liveOnce(frame), { cache, sessionId: 's', variant: 'v', config: {}, state: state() })
+  );
+  assert.deepEqual(cache.calls.stored, []);
+});
+
+test('a settled page is still cached on a miss', async () => {
+  const cache = cacheMiss();
+  const frame = {
+    type: 'snapshot',
+    cursor: 5,
+    records: [record(5)],
+    hasMore: false,
+    assistantStream: { revision: 7 },
+  };
+  await collect(
+    wrapPageCache(liveOnce(frame), { cache, sessionId: 's', variant: 'v', config: {}, state: state() })
+  );
+  assert.equal(cache.calls.stored.length, 1);
+  assert.equal(cache.calls.stored[0][0], 's');
+});

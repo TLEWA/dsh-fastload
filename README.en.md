@@ -84,7 +84,16 @@ the log files themselves are never modified.
   page window + trim config". On a hit the cached page is sent first while the
   real `follow` still builds in the background; events after the cached cursor
   are forwarded. If the cursors disagree the cache is dropped and a second
-  snapshot is never emitted.
+  snapshot is never emitted. Only settled pages are cached: a first frame whose
+  assistant baseline still has an active attempt is not stored, because the next
+  chunk already makes that snapshot stale.
+- Running-session window: while the Agent is streaming (`running`), the initial
+  page shrinks to `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` (24) messages and the page
+  cache is skipped by default (`DSH_FASTLOAD_RUNNING_PAGE_CACHE=0`). A
+  tool-heavy turn of 100 messages can be 900+ events and several megabytes; while
+  the model streams, the user only reads the tail, and older history comes back
+  through the built-in "Load older" with unchanged semantics. The next open after
+  the turn settles returns to the 100-message window.
 - Replay-stream strip: `assistant/message.data.stream` becomes `[]` in the
   first frame (not deleted, because clients iterate it). Transcripts render from
   `data.message` and usage comes from `data.usage`, so visible content is
@@ -108,6 +117,7 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_ENABLED` | `1` | Set to `0` to disable only the Host first-page rewrite and trim; the Web client still fills one page. |
 | `DSH_FASTLOAD_FORCE` | `0` | Rewrite every initial page, even an explicit smaller one. |
 | `DSH_FASTLOAD_MAX_MESSAGES` | `100` | Initial page message cap. |
+| `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Initial page message cap while the Agent is streaming; initial pages only. Set it equal to `MAX_MESSAGES` to disable the running shrink. |
 | `DSH_FASTLOAD_MIN_MESSAGES` | `40` | Minimum messages before the turn window may cut. |
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | Target complete turns at the tail; `maxMessages` still caps the page. |
 | `DSH_FASTLOAD_MAX_BYTES` | `0` | Soft byte budget; `0` disables byte trimming. |
@@ -115,6 +125,7 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_SCAN_CACHE` | `1` | Session-header index and list TTL memo; `0` re-reads every header. |
 | `DSH_FASTLOAD_STRIP_STREAM` | `1` | Strip replay `data.stream` from the first frame. |
 | `DSH_FASTLOAD_PAGE_CACHE` | `1` | Persist the opening page. |
+| `DSH_FASTLOAD_RUNNING_PAGE_CACHE` | `0` | Read and write the page cache while the Agent is streaming. Off by default: a page stored mid-stream is stale on the next chunk, and a hit is dropped and reopened in full. |
 | `DSH_FASTLOAD_IDLE_CACHE_REFRESH` | `0` | Warm the page cache during idle windows with a read-only follow (`activate: false`); never writes the session store or original logs, and checks the `revision` before and after building. |
 | `DSH_FASTLOAD_DEFER_LIVE_BUILD` | `1` | After a page-cache hit, delay the real follow by at most 16 ms so the cached first frame can paint first; on by default. A real click in 0.2.2-rc.1 opens with `activate=true`, so the click path does not actually defer; only passive requests with `activate:false` (prewarm/restore) are affected. Set `0` to disable (see `docs/design.md`). |
 | `DSH_FASTLOAD_REWIND_AWARE` | `1` | Prepend one page when rewinds hide the whole initial page. |
@@ -123,6 +134,15 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_PAGE_CACHE_FILES` | `400` | Maximum cached page files. |
 | `DSH_FASTLOAD_CACHE_DIR` | empty | Cache directory; empty means `$DSH_HOME/cache/dsh-fastload`. |
 | `DSH_FASTLOAD_DEBUG` | `0` | Log each trim through the DSH logger. |
+
+The running window only rewrites initial pages (no `beforeSeq`/`throughSeq`) and needs the
+Session's live Agent status: anything but `running` (including a throwing lookup) keeps the
+100-message window. Its `turnWindow` is
+`{ minMessages: min(MIN_MESSAGES, RUNNING_MAX_MESSAGES), minTurns: 1 }`, so a short turn is kept
+whole and a long turn stops at 24 messages. The page cache is skipped as well, because its key
+contains the persistence revision, which moves on every streamed frame, and the real first frame's
+`assistantStream.revision` almost always moves too: the lookup either misses or hits and is then
+dropped. Measured numbers are in `docs/research/streaming-open-latency.md`.
 
 Deferral is on by default and applies only when the cache really hits, the request is an initial
 page (no `beforeSeq`/`throughSeq`), `activate !== true`, `assistantStream` has no active attempt,

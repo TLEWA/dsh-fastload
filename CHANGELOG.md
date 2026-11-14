@@ -5,6 +5,29 @@
 
 [简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md)
 
+## [Unreleased]
+
+### 新增
+
+- **运行期专属首屏窗口（`DSH_FASTLOAD_RUNNING_MAX_MESSAGES`，默认 24）。**
+  Agent 处于 `running` 时，初始页请求改写成 24 条消息、
+  `turnWindow={ minMessages: min(MIN_MESSAGES, 24), minTurns: 1 }`；其它状态与所有非初始页
+  （`beforeSeq`/`throughSeq`）保持原窗口。实测同一会话（1 个 turn、166 条 assistant
+  消息、248 条 PTC 派发事件）：100 条窗口 = 912 条事件 / 3.63 MiB，24 条窗口 = 243 条事件 /
+  0.63 MiB（事件数 −73%，字节 −83%）。
+- **流式期默认跳过页缓存（`DSH_FASTLOAD_RUNNING_PAGE_CACHE`，默认 `0`）。** 缓存键含
+  persistence revision，流式期每帧都变；命中后真实首帧的 `assistantStream.revision`
+  也几乎必然前进，结果是命中即丢弃并整页重开。运行期改为既不读也不写。
+
+### 修复
+
+- **页缓存只保存稳定页。** 首帧 `assistantStream` 仍带进行中的 attempt 时不再 `store`，
+  避免为每次流式打开写一份立刻作废的整页快照（实测 25 分钟内写出 201 个文件 / 33 MB，
+  单个 3.5 MB 页面在流式期每次打开都重写一遍）。
+- **流式会话打开被整页重开拖慢。** 流式会话里每次打开要么缓存未命中，要么命中后几毫秒内
+  被 `assistantStream.revision` 前进丢弃、客户端再整页 `open` 一次；运行期小页 + 跳过
+  缓存消除了这条双开路径。诊断与实测见 `docs/research/streaming-open-latency.md`。
+
 ## [0.3.2] - 2026-11-12
 
 ### 修复
