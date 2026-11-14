@@ -48,12 +48,13 @@ export function readConfig(env = process.env) {
     maxMessages
   );
   const maxBytesRaw = readInt(env, 'DSH_FASTLOAD_MAX_BYTES', DEFAULTS.maxBytes, 0, 64 * 1024 * 1024);
-  const runningMaxMessages = readInt(
-    env,
-    'DSH_FASTLOAD_RUNNING_MAX_MESSAGES',
-    DEFAULTS.runningMaxMessages,
-    1,
-    10_000
+  // The running window is a shrink, never a widen: an operator who capped
+  // MAX_MESSAGES below the running default must not see the first page grow
+  // the moment the Agent starts streaming. Clamping here keeps every consumer
+  // (window rewrite, turnWindow, serve.log, diagnostics) on the same value.
+  const runningMaxMessages = Math.min(
+    maxMessages,
+    readInt(env, 'DSH_FASTLOAD_RUNNING_MAX_MESSAGES', DEFAULTS.runningMaxMessages, 1, 10_000)
   );
 
   return {

@@ -317,8 +317,10 @@ turn, 166 assistant messages, 248 `tool/ptc-dispatch` events):
 PR1 makes two changes:
 
 1. **Running window.** When `statusOf(sessionId) === 'running'`, an initial page
-   is rewritten to `maxMessages = runningMaxMessages` (24) and
-   `turnWindow = { minMessages: min(minMessages, 24), minTurns: 1 }`. The same
+   is rewritten to `maxMessages = min(maxMessages, runningMaxMessages)` and
+   `turnWindow = { minMessages: min(minMessages, that value), minTurns: 1 }`.
+   The running window is a clamp, never a widen: an operator cap below 24 shrinks
+   the streaming page too. The same
    Session then yields 243 records / 0.63 MiB (−73% records, −83% bytes).
    Non-initial pages and every other status keep the canonical window; internal
    cache-refresh builds are excluded so one cache variant never mixes windows.

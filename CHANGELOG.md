@@ -14,7 +14,8 @@
   `turnWindow={ minMessages: min(MIN_MESSAGES, 24), minTurns: 1 }`；其它状态与所有非初始页
   （`beforeSeq`/`throughSeq`）保持原窗口。实测同一会话（1 个 turn、166 条 assistant
   消息、248 条 PTC 派发事件）：100 条窗口 = 912 条事件 / 3.63 MiB，24 条窗口 = 243 条事件 /
-  0.63 MiB（事件数 −73%，字节 −83%）。
+  0.63 MiB（事件数 −73%，字节 −83%）。运行期窗口是收缩而不是放大：其有效值取
+  `min(MAX_MESSAGES, RUNNING_MAX_MESSAGES)`，因此把 `MAX_MESSAGES` 设到 24 以下时首屏不会反而变大。
 - **流式期默认跳过页缓存（`DSH_FASTLOAD_RUNNING_PAGE_CACHE`，默认 `0`）。** 缓存键含
   persistence revision，流式期每帧都变；命中后真实首帧的 `assistantStream.revision`
   也几乎必然前进，结果是命中即丢弃并整页重开。运行期改为既不读也不写。

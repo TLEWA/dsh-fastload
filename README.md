@@ -90,7 +90,7 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_ENABLED` | `1` | 设为 `0` 只关闭 Host 端首屏改写与裁剪；Web 端一次后台补齐仍会运行。 |
 | `DSH_FASTLOAD_FORCE` | `0` | 强制改写所有首屏，包括显式的小页。 |
 | `DSH_FASTLOAD_MAX_MESSAGES` | `100` | 首屏消息上限。 |
-| `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Agent 正在输出时的首屏消息上限；只作用于初始页。设为与 `MAX_MESSAGES` 相同即关闭运行期收缩。 |
+| `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Agent 正在输出时的首屏消息上限；只作用于初始页。设为与 `MAX_MESSAGES` 相同即关闭运行期收缩。该值不会超过 `MAX_MESSAGES`：把 `MAX_MESSAGES` 调到 24 以下时会同时压低运行期窗口，而不是把首屏放大。 |
 | `DSH_FASTLOAD_MIN_MESSAGES` | `40` | turnWindow 允许裁切前的最小消息数。 |
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | turnWindow 目标保留的尾部 turn 数；仍受 `maxMessages` 硬上限约束。 |
 | `DSH_FASTLOAD_MAX_BYTES` | `0` | 软字节预算；`0` 表示不按字节裁。 |

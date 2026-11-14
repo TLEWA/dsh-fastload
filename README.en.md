@@ -117,7 +117,7 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_ENABLED` | `1` | Set to `0` to disable only the Host first-page rewrite and trim; the Web client still fills one page. |
 | `DSH_FASTLOAD_FORCE` | `0` | Rewrite every initial page, even an explicit smaller one. |
 | `DSH_FASTLOAD_MAX_MESSAGES` | `100` | Initial page message cap. |
-| `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Initial page message cap while the Agent is streaming; initial pages only. Set it equal to `MAX_MESSAGES` to disable the running shrink. |
+| `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Initial page message cap while the Agent is streaming; initial pages only. Set it equal to `MAX_MESSAGES` to disable the running shrink. It never exceeds `MAX_MESSAGES`, so a cap below 24 also narrows the running page instead of widening it. |
 | `DSH_FASTLOAD_MIN_MESSAGES` | `40` | Minimum messages before the turn window may cut. |
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | Target complete turns at the tail; `maxMessages` still caps the page. |
 | `DSH_FASTLOAD_MAX_BYTES` | `0` | Soft byte budget; `0` disables byte trimming. |

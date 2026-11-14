@@ -15,7 +15,9 @@ All notable changes are documented here. Versions follow
   status and every non-initial page (`beforeSeq`/`throughSeq`) keeps the original window.
   Measured on one real Session (one turn, 166 assistant messages, 248 PTC dispatch events):
   the 100-message window was 912 events / 3.63 MiB, the 24-message window 243 events /
-  0.63 MiB (−73% events, −83% bytes).
+  0.63 MiB (−73% events, −83% bytes). The running window only ever shrinks: its effective value
+  is `min(MAX_MESSAGES, RUNNING_MAX_MESSAGES)`, so a `MAX_MESSAGES` cap below 24 narrows the
+  streaming page instead of widening it.
 - **The page cache is skipped while streaming (`DSH_FASTLOAD_RUNNING_PAGE_CACHE`, default
   `0`).** The cache key contains the persistence revision, which moves on every streamed frame,
   and the real first frame's `assistantStream.revision` almost always moves as well, so a hit is
