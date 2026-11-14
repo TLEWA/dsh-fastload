@@ -389,6 +389,25 @@ Numbers are a snapshot from around 2026-11-14 17:00; the Session keeps growing,
 so a replay drifts. The running byte trim makes the first page ~18× smaller than
 the idle 100-message window and another ~2× smaller than the 24-message window.
 
+#### Isolated-instance A/B (2026-11-14 17:40)
+
+Cross-Session numbers are not clean enough, so a second DSH instance was started
+with its own `DSH_HOME`, a random port and a local mock LLM, seeded with the real
+heavy Session log and its attachments. A live turn with 25 tool rounds (40 KB
+result each) runs inside it, both arms `cache=off`:
+
+| Arm | First-page payload | Click → first row (5 runs) |
+|---|---:|---|
+| A: stage 9 24-message window only (`RUNNING_MAX_BYTES=0`) | 593–878 KB | 54 / 42 / 42 / 45 / 50 ms |
+| B: stage 10, 256 KiB byte trim | 249–252 KB | 38 / 39 / 34 / 33 / 39 ms |
+
+Same Session in `serve.log`: arm A logs `mode=running max=24 turns=24/1 cache=off`; every
+arm B page has `trim … at=message bytes=593493->252011 records=137->34`. Arm B was measured
+with about 400 flowItems already in the DOM (the Session had been opened in full earlier)
+while arm A had 33, so B's lead is a conservative lower bound.
+
+Both arms only change the "open a Session that is streaming" path.
+
 Per-item assessment, reasons for the items not implemented and the upstream
 proposals are in `docs/research/dsh-first-open-p1-p8-assessment.md`.
 
