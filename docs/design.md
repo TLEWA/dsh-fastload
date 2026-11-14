@@ -296,8 +296,8 @@ Stages 0–8 bounded the initial page by message and turn count and cached it by
 revision. Neither covers the case the user reports: opening a Session whose
 Agent is streaming.
 
-Measured on the real GUI (2026-11-14, DSH 0.2.2-rc.1, `session-0333c160…`: one
-turn, 166 assistant messages, 248 `tool/ptc-dispatch` events):
+Measured on the real GUI (2026-11-14, DSH 0.2.2-rc.1, `session-0333c160…`:
+166 assistant messages, 248 `tool/ptc-dispatch` events):
 
 - The Host's own `follow` is cheap. `serve.log` recorded `open→live` of 20–60 ms
   for pages of 800–1000 records, so the page build is not the bottleneck.
@@ -305,9 +305,9 @@ turn, 166 assistant messages, 248 `tool/ptc-dispatch` events):
   which 48.7% of the bytes are `tool/ptc-dispatch`, 25.2% `tool/result` and 14.7%
   `assistant/message`. One PTC step emits about ten events, so "100 messages"
   means roughly 1000 events.
-- The byte trim never fires here: `planTrim` cuts only at `turn/start` and keeps
-  `minTurns` turns, and this Session has a single turn, so `starts.length <
-  minTurns` returns the page unchanged.
+- The turn-aligned byte trim cannot bound the running page: `planTrim` cuts
+  only at `turn/start` and keeps whole `minTurns` turns, so one long
+  tool-heavy turn stays intact. It is also off by default (`maxBytes = 0`).
 - The page cache cannot serve a streaming open. The key contains the persistence
   revision (moves on every append) and `wrapPageCache` additionally requires the
   live `assistantStream.revision` to equal the cached one. Over a 25-minute
@@ -339,6 +339,37 @@ What stage 9 leaves open: the renderer still expands the active attempt into
 `ConversationAssembler.replaceWindow`, and the first frame still carries all
 0.63 MiB of records. Evidence and follow-up options are in
 `docs/research/streaming-open-latency.md`.
+
+## Running byte budget (stage 10)
+
+Stage 9 shrank the running window by message count, but not by bytes: the Host
+pager counts only messages, and every message drags the tool/job events that
+followed it, so a tool-heavy tail can still be hundreds of KiB. On the recorded
+Session (session-0333c160, 2026-11-14 snapshot) the 24-message window is
+**239 records / 451 KiB** versus 958 records / 4.0 MiB for the idle
+100-message window — much better, but still a large first frame when one tool
+result or dispatch group dominates the tail.
+
+The plugin therefore enforces its own byte budget on the running first page and
+cuts at **message** boundaries (`user/message`, `assistant/message`), which is
+the same shape a native page has when the Host cuts inside a turn:
+
+1. `runningMaxBytes` (default 256 KiB, env `DSH_FASTLOAD_RUNNING_MAX_BYTES`)
+   is applied after the message window and `planCompact`, and it is a shrink of
+   any operator `maxBytes`, never a widen.
+2. The cut keeps at least `runningMinMessages` (default 4, env
+   `DSH_FASTLOAD_RUNNING_MIN_MESSAGES`) message groups. If they alone exceed
+   the soft budget they are kept up to `hardCapBytes`; a tail that cannot fit
+   the hard cap is left untouched, exactly like the turn-aligned path.
+3. `hasMore: true` is set so the built-in "Load older" continues to page
+   backwards with unchanged semantics. Idle opens keep the turn-aligned trim;
+   `protectSeq` (rewind recovery) is honoured at message starts too.
+
+Measured on the recorded log (2026-11-14 17:00 snapshot, replaying the Host
+pager, then compact/strip and trim): a 256 KiB budget keeps 141 records /
+232 KiB — about 2× smaller than the 24-message page and ~18× smaller than the
+idle 100-message page. Every cut writes a `serve.log` line
+(`trim sid=… at=message bytes=…->… records=…->… cut=…`).
 
 ## CSS content-visibility (stage 4, NO-GO)
 

@@ -166,6 +166,22 @@ test('leaves the page alone when the recovered turn cannot fit the hard cap', ()
   assert.equal(result.opening, opening);
 });
 
+test('keeps the whole page when the recovered turn is the first one', () => {
+  // The rewind extension can pull the only visible turn in front of a hidden
+  // tail, making that turn record 0. Index 0 is a legal protection point.
+  const opening = page(8, 2000);
+  const result = planTrim(opening, {
+    maxBytes: 3000,
+    hardCapBytes: 8 * 1024 * 1024,
+    minTurns: 2,
+    protectSeq: opening.records[0].event.seq,
+  });
+
+  assert.equal(result.info, null, 'cutting at index 0 would empty the transcript');
+  assert.equal(result.opening, opening);
+  assert.equal(result.opening.records[0].event.seq, 1);
+});
+
 test('ignores a protectSeq that is not in the page', () => {
   const opening = page(8, 2000);
   const result = planTrim(opening, {
@@ -174,6 +190,145 @@ test('ignores a protectSeq that is not in the page', () => {
     protectSeq: 999999,
   });
   assert.notEqual(result.info, null);
+});
+
+function longTurn(groups = 30, textSize = 4000) {
+  const records = [
+    rec(1, 'turn/start', { turnId: 'turn-0' }),
+    rec(2, 'user/message', { message: { content: 'q' } }),
+  ];
+  let seq = 3;
+  for (let i = 0; i < groups; i += 1) {
+    records.push(
+      rec(seq++, 'assistant/message', {
+        message: { content: 'a'.repeat(textSize) },
+        sourceEventSeqs: [seq - 1],
+      })
+    );
+    records.push(rec(seq++, 'tool/call', { call: { name: 'read', input: 'x'.repeat(textSize) } }));
+    records.push(rec(seq++, 'tool/result', { result: { content: 'y'.repeat(textSize) } }));
+  }
+  return { type: 'snapshot', records, hasMore: true };
+}
+
+function bytesOf(records) {
+  return records.reduce((sum, record) => sum + Buffer.byteLength(JSON.stringify(record), 'utf8'), 0);
+}
+
+test('message-aligned trim cuts a single-turn page the Host pager cannot window', () => {
+  const opening = longTurn();
+  const result = planTrim(opening, {
+    maxBytes: 64 * 1024,
+    hardCapBytes: 8 * 1024 * 1024,
+    minMessages: 4,
+    cutAtMessages: true,
+  });
+
+  assert.notEqual(result.info, null, 'a one-turn page must still be windowed');
+  assert.equal(result.info.cutAt, 'message');
+  assert.ok(result.info.afterRecords < result.info.beforeRecords);
+  assert.ok(bytesOf(result.opening.records) <= 64 * 1024, 'the kept tail fits the budget');
+  assert.equal(result.opening.hasMore, true);
+  assert.equal(result.opening.records[0].event.type, 'assistant/message', 'cut at a message start');
+  const kept = result.opening.records.filter((record) => record.event.type === 'assistant/message');
+  assert.ok(kept.length >= 4, 'the newest minMessages message groups stay');
+});
+
+test('message-aligned trim keeps the newest messages when they alone exceed the budget', () => {
+  const opening = longTurn(10, 4000);
+  const result = planTrim(opening, {
+    maxBytes: 1000,
+    hardCapBytes: 10 * 1024 * 1024,
+    minMessages: 3,
+    cutAtMessages: true,
+  });
+
+  assert.notEqual(result.info, null);
+  assert.equal(result.info.cutAt, 'message');
+  const kept = result.opening.records.filter((record) => record.event.type === 'assistant/message');
+  assert.equal(kept.length, 3, 'the protected tail wins over the soft budget');
+});
+
+test('message-aligned trim leaves the page alone below the budget', () => {
+  const opening = page(4, 100);
+  const result = planTrim(opening, {
+    maxBytes: 10 * 1024 * 1024,
+    minMessages: 4,
+    cutAtMessages: true,
+  });
+  assert.equal(result.info, null);
+  assert.equal(result.opening, opening);
+});
+
+test('message-aligned trim keeps a rewind-recovered message', () => {
+  const opening = longTurn(20, 4000);
+  const target = opening.records.find(
+    (record, index) => index > 10 && record.event.type === 'assistant/message'
+  );
+  const result = planTrim(opening, {
+    maxBytes: 32 * 1024,
+    hardCapBytes: 8 * 1024 * 1024,
+    minMessages: 2,
+    cutAtMessages: true,
+    protectSeq: target.event.seq,
+  });
+
+  assert.notEqual(result.info, null);
+  assert.ok(result.opening.records[0].event.seq <= target.event.seq);
+  const kept = result.opening.records.some(
+    (record) => record.event.type === 'assistant/message' && record.event.seq === target.event.seq
+  );
+  assert.equal(kept, true);
+});
+
+test('message-aligned trim keeps the whole page when message 0 is protected', () => {
+  const records = [rec(1, 'assistant/message', { message: { content: 'only visible' } })];
+  let seq = 2;
+  for (let i = 0; i < 40; i += 1) {
+    records.push(
+      rec(seq++, 'assistant/message', { message: { content: 'h'.repeat(4000) } })
+    );
+  }
+  const opening = { type: 'snapshot', records, hasMore: true };
+  const result = planTrim(opening, {
+    maxBytes: 16 * 1024,
+    hardCapBytes: 8 * 1024 * 1024,
+    minMessages: 2,
+    cutAtMessages: true,
+    protectSeq: 1,
+  });
+
+  assert.equal(result.info, null, 'the protected first message must survive the cut');
+  assert.equal(result.opening, opening);
+  assert.equal(result.opening.records[0].event.seq, 1);
+});
+
+test('message-aligned cut still honours the hard cap for the protected tail', () => {
+  const opening = longTurn(10, 4000);
+  const result = planTrim(opening, {
+    maxBytes: 1000,
+    hardCapBytes: 2000,
+    minMessages: 3,
+    cutAtMessages: true,
+  });
+
+  assert.equal(result.info, null, 'a tail that cannot fit the hard cap is left untouched');
+  assert.equal(result.opening, opening);
+});
+
+test('running byte budget defaults are parsed and clamped', () => {
+  const config = readConfig({});
+  assert.equal(config.runningMaxBytes, 256 * 1024);
+  assert.equal(config.runningMinMessages, 4);
+  // A nonzero budget below the floor is raised to 32 KiB; 0 disables the cut.
+  assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MAX_BYTES: '1024' }).runningMaxBytes, 32 * 1024);
+  assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MAX_BYTES: '0' }).runningMaxBytes, 0);
+  assert.equal(
+    readConfig({ DSH_FASTLOAD_RUNNING_MAX_BYTES: 'nope' }).runningMaxBytes,
+    256 * 1024
+  );
+  assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MIN_MESSAGES: '2' }).runningMinMessages, 2);
+  assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MIN_MESSAGES: '0' }).runningMinMessages, 4);
 });
 
 test('running page defaults leave the idle page untouched', () => {

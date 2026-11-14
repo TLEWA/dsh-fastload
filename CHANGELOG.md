@@ -12,10 +12,14 @@
 - **运行期专属首屏窗口（`DSH_FASTLOAD_RUNNING_MAX_MESSAGES`，默认 24）。**
   Agent 处于 `running` 时，初始页请求改写成 24 条消息、
   `turnWindow={ minMessages: min(MIN_MESSAGES, 24), minTurns: 1 }`；其它状态与所有非初始页
-  （`beforeSeq`/`throughSeq`）保持原窗口。实测同一会话（1 个 turn、166 条 assistant
-  消息、248 条 PTC 派发事件）：100 条窗口 = 912 条事件 / 3.63 MiB，24 条窗口 = 243 条事件 /
+  （`beforeSeq`/`throughSeq`）保持原窗口。实测同一会话（166 条 assistant 消息、248 条 PTC 派发事件）：100 条窗口 = 912 条事件 / 3.63 MiB，24 条窗口 = 243 条事件 /
   0.63 MiB（事件数 −73%，字节 −83%）。运行期窗口是收缩而不是放大：其有效值取
   `min(MAX_MESSAGES, RUNNING_MAX_MESSAGES)`，因此把 `MAX_MESSAGES` 设到 24 以下时首屏不会反而变大。
+- **运行期字节上限（`DSH_FASTLOAD_RUNNING_MAX_BYTES`，默认 256 KiB）。** 消息窗口只约束
+  条数：工具/派发事件会随消息一起进入首屏，24 条消息仍可能是数百 KiB（实测同一会话
+  239 条记录 / 451 KiB）。运行期首屏因此在**消息边界**再裁一次，默认保留最新 4 条消息
+  （`DSH_FASTLOAD_RUNNING_MIN_MESSAGES`）且整页不超过 256 KiB（实测 141 条记录 / 232 KiB）；
+  这些消息本身超预算时优先保留到 `HARD_CAP_BYTES`。空闲打开不变，仍按 turn 语义裁切。
 - **流式期默认跳过页缓存（`DSH_FASTLOAD_RUNNING_PAGE_CACHE`，默认 `0`）。** 缓存键含
   persistence revision，流式期每帧都变；命中后真实首帧的 `assistantStream.revision`
   也几乎必然前进，结果是命中即丢弃并整页重开。运行期改为既不读也不写。
@@ -25,6 +29,11 @@
 - **页缓存只保存稳定页。** 首帧 `assistantStream` 仍带进行中的 attempt 时不再 `store`，
   避免为每次流式打开写一份立刻作废的整页快照（实测 25 分钟内写出 201 个文件 / 33 MB，
   单个 3.5 MB 页面在流式期每次打开都重写一遍）。
+- **rewind 找回的首条消息不再被字节裁剪删掉。** 运行期消息边界裁剪此前把保护点限定在
+  `protectIndex > 0`：当 `/rewind` 扩页把唯一可见消息放在合并页第一条时，裁剪会再次
+  删掉它，首帧仍是空 transcript。现在索引 0 也算保护点，代价是整页保留（不裁剪）。
+  回归测试：`message-aligned trim keeps the whole page when message 0 is protected`、
+  `keeps the whole page when the recovered turn is the first one`。
 - **流式会话打开被整页重开拖慢。** 流式会话里每次打开要么缓存未命中，要么命中后几毫秒内
   被 `assistantStream.revision` 前进丢弃、客户端再整页 `open` 一次；运行期小页 + 跳过
   缓存消除了这条双开路径。诊断与实测见 `docs/research/streaming-open-latency.md`。

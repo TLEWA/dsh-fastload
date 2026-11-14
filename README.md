@@ -70,6 +70,11 @@ firstAnchor 看起来很快，实际上是一个空页。
   （`DSH_FASTLOAD_RUNNING_PAGE_CACHE=0`）。工具密集的 turn 里 100 条消息可以是
   900 多条事件、数 MB 的首帧；正在输出时用户只看尾部，更早的历史由“加载更早”
   按原语义补回。turn 结束后的下一次打开自动恢复 100 条窗口。
+- 运行期字节上限：消息窗口按条数算，工具/派发事件会随消息一起进来，24 条消息仍可能
+  带回数百 KiB 的首帧（实测同一会话 239 条记录 / 451 KiB）。运行期首屏因此在**消息边界**
+  再裁一次：默认整页不超过 `DSH_FASTLOAD_RUNNING_MAX_BYTES`（256 KiB；实测 141 条记录 /
+  232 KiB），并至少保留 `DSH_FASTLOAD_RUNNING_MIN_MESSAGES`（4）条最新消息；更早内容仍由
+  “加载更早”补回。空闲打开不受影响，仍按 turn 语义裁切。
 - replay stream 剥离：首帧里 `assistant/message.data.stream` 被替换成 `[]`
   （不是删除键，客户端会直接迭代它）。transcript 从 `data.message` 渲染、
   用量从 `data.usage` 读，所以可见内容不变。
@@ -91,6 +96,8 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_FORCE` | `0` | 强制改写所有首屏，包括显式的小页。 |
 | `DSH_FASTLOAD_MAX_MESSAGES` | `100` | 首屏消息上限。 |
 | `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Agent 正在输出时的首屏消息上限；只作用于初始页。设为与 `MAX_MESSAGES` 相同即关闭运行期收缩。该值不会超过 `MAX_MESSAGES`：把 `MAX_MESSAGES` 调到 24 以下时会同时压低运行期窗口，而不是把首屏放大。 |
+| `DSH_FASTLOAD_RUNNING_MAX_BYTES` | `262144` | Agent 正在输出时的首屏字节预算，由插件在消息边界裁切（Host 分页只能按 turn 切）。`0` 关闭；最小 32 KiB；与 `MAX_BYTES` 同时设置时取更小值。 |
+| `DSH_FASTLOAD_RUNNING_MIN_MESSAGES` | `4` | 运行期字节裁剪至少保留的最新消息数；这些消息本身超预算时优先保留，直到 `HARD_CAP_BYTES`。 |
 | `DSH_FASTLOAD_MIN_MESSAGES` | `40` | turnWindow 允许裁切前的最小消息数。 |
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | turnWindow 目标保留的尾部 turn 数；仍受 `maxMessages` 硬上限约束。 |
 | `DSH_FASTLOAD_MAX_BYTES` | `0` | 软字节预算；`0` 表示不按字节裁。 |
@@ -114,7 +121,9 @@ Session 的实时 Agent 状态：状态不是 `running`（含查询抛错）时�
 即短 turn 整段保留、长 turn 最多 24 条消息。页缓存默认同时跳过，因为缓存键里的
 persistence revision 在流式期每帧都在变，命中后真实首帧的 `assistantStream.revision`
 也几乎必然前进，结果要么未命中、要么命中即丢弃。实测数据见
-`docs/research/streaming-open-latency.md`。
+`docs/research/streaming-open-latency.md`。一个 turn 可以超过任何消息窗口，因此运行期
+首屏还会在消息边界按 `RUNNING_MAX_BYTES` 再裁一次；该预算同样只收缩不放大（与
+`MAX_BYTES` 同设时取更小值），每次裁切写一条 `serve.log`（`at=message`、前后字节与记录数）。
 
 延后默认开启，只有缓存确实命中、请求为初始页（无 `beforeSeq`/`throughSeq`）、
 `activate !== true`、`assistantStream` 没有进行中的 attempt，且能确认 Agent 空闲时才生效。
@@ -277,6 +286,49 @@ npm test
 
 扩页只在前一页与当前页 `seq` 正好接上时合并，且只往回补一页；页缓存命中后仍按
 cursor / revision 校验并补发增量。
+
+### 2026-11-14 运行期打开（Agent 正在输出）
+
+用户点进一个正在流式输出的会话时，宿主 `follow` 本身只要 20–60 ms（`serve.log` 的
+`open→live`），慢在 renderer 要 ingest 整页；页缓存命中反而要花 56–106 ms 解压 + 解析，
+所以运行期默认跳过缓存。同一宿主进程（pid 4172）、同一前端构建，点击侧栏会话行到首行出现：
+
+| 打开对象 | 首页规模 | 点击 → 首行 |
+|---|---:|---:|
+| 正在输出（running 24 条窗口，页缓存关） | —（未记录） | 105 / 118 / 119 / 109 / 176 ms |
+| 已结束的重型会话（100 条窗口，页缓存命中） | 951 条记录 | 277 / 274 / 284 ms |
+
+这是**跨会话**对照：running 那几次会话还在早期，页本来就更小；同一会话的开关 A/B
+需要改环境变量并重启宿主，本轮没有做。
+
+同一会话（`session-0333c160…`，用真实日志重放宿主分页 + 本插件的 compact/strip/trim）
+的首帧载荷：
+
+| 请求 | 记录 | wire 字节 |
+|---|---:|---:|
+| 空闲默认 100/40/2 | 958 | 4.0 MiB |
+| 运行期 24/24/1（阶段 9） | 239 | 451 KiB |
+| + `RUNNING_MAX_BYTES` = 256 KiB（阶段 10） | 141 | 232 KiB |
+
+数字是 2026-11-14 17:00 左右的日志快照（会话仍在增长，重放会随之变化）。运行期字节
+裁剪让首屏比空闲 100 条窗口小约 18×、比 24 条窗口再小约 2×。
+
+#### 隔离实例 A/B（2026-11-14 17:40）
+
+跨会话对照不够干净，另起了一个独立 DSH 实例（独立 `DSH_HOME`、随机端口、本地 mock
+LLM），把真实重型会话日志和附件复制进去，在会话里跑一个 25 轮工具调用的 turn（每轮
+结果 40 KB），两臂都 `cache=off`：
+
+| 臂 | 首页载荷 | 点击 → 首帧（5 次） |
+|---|---:|---|
+| A：只有阶段 9 的 24 条窗口（`RUNNING_MAX_BYTES=0`） | 593–878 KB | 54 / 42 / 42 / 45 / 50 ms |
+| B：阶段 10，256 KiB 字节裁剪 | 249–252 KB | 38 / 39 / 34 / 33 / 39 ms |
+
+`serve.log` 里是同一会话：A 臂 `mode=running max=24 turns=24/1 cache=off`，B 臂每页都带
+`trim … at=message bytes=593493->252011 records=137->34`。B 臂量测时 DOM 里已累计约 400 个
+flowItem（此前整页打开过一次），A 臂只有 33 个，所以 B 的领先是个偏保守的下界。
+
+两臂都只影响“点进正在输出的会话”这一条路径。
 
 逐项评估、未实施项的原因和上游改造方案见
 `docs/research/dsh-first-open-p1-p8-assessment.md`。

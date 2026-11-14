@@ -13,11 +13,18 @@ All notable changes are documented here. Versions follow
   default 24).** When the Agent is `running`, the initial page request is rewritten to 24
   messages with `turnWindow={ minMessages: min(MIN_MESSAGES, 24), minTurns: 1 }`; every other
   status and every non-initial page (`beforeSeq`/`throughSeq`) keeps the original window.
-  Measured on one real Session (one turn, 166 assistant messages, 248 PTC dispatch events):
+  Measured on one real Session (166 assistant messages, 248 PTC dispatch events):
   the 100-message window was 912 events / 3.63 MiB, the 24-message window 243 events /
   0.63 MiB (−73% events, −83% bytes). The running window only ever shrinks: its effective value
   is `min(MAX_MESSAGES, RUNNING_MAX_MESSAGES)`, so a `MAX_MESSAGES` cap below 24 narrows the
   streaming page instead of widening it.
+- **A running byte budget (`DSH_FASTLOAD_RUNNING_MAX_BYTES`, default 256 KiB).** A message
+  window bounds messages, not bytes: tool/dispatch events travel with each message, so 24
+  messages can still be a few hundred KiB (measured: 239 records / 451 KiB on the same
+  Session). The streaming page is therefore cut again at **message** boundaries: at least
+  the newest 4 messages (`DSH_FASTLOAD_RUNNING_MIN_MESSAGES`) are kept and the page stays
+  under 256 KiB (141 records / 232 KiB measured); if those messages alone exceed the budget
+  they are kept up to `HARD_CAP_BYTES`. Idle opens are unchanged and keep the turn-aligned trim.
 - **The page cache is skipped while streaming (`DSH_FASTLOAD_RUNNING_PAGE_CACHE`, default
   `0`).** The cache key contains the persistence revision, which moves on every streamed frame,
   and the real first frame's `assistantStream.revision` almost always moves as well, so a hit is
@@ -29,6 +36,13 @@ All notable changes are documented here. Versions follow
   active attempt is no longer stored: that snapshot is stale on the next chunk. Previously every
   streaming open wrote a full page that was invalid immediately (201 files / 33 MB in 25 minutes,
   a single 3.5 MB page rewritten per open).
+- **The message recovered by a rewind is no longer trimmed away when it is record 0.** The
+  running message-aligned cut used to protect only `protectIndex > 0`; when the `/rewind`
+  extension placed the only visible message first in the merged page, the cut removed it again
+  and the first frame was still an empty transcript. Index 0 is now a legal protection point,
+  at the cost of keeping the whole page untrimmed. Regression tests:
+  `message-aligned trim keeps the whole page when message 0 is protected` and
+  `keeps the whole page when the recovered turn is the first one`.
 - **A streaming Session no longer reopens its page twice.** Each open was either a cache miss or
   a hit that the next `assistantStream.revision` invalidated a few milliseconds later, after
   which the client opened the page again from scratch. The running window plus the cache skip

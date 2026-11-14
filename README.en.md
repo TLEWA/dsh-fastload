@@ -94,6 +94,14 @@ the log files themselves are never modified.
   the model streams, the user only reads the tail, and older history comes back
   through the built-in "Load older" with unchanged semantics. The next open after
   the turn settles returns to the 100-message window.
+- Running byte budget: a message window counts messages, not bytes, and each
+  message drags the tool/dispatch events around it, so 24 messages can still be
+  a few hundred KiB (measured: 239 records / 451 KiB on the same Session).
+  Streaming pages are therefore also cut at **message** boundaries: the page
+  stays under `DSH_FASTLOAD_RUNNING_MAX_BYTES` (256 KiB; 141 records / 232 KiB
+  measured) while keeping at least `DSH_FASTLOAD_RUNNING_MIN_MESSAGES` (4) of
+  the newest messages. Older history still comes back through "Load older", and
+  idle opens keep the turn-aligned trim.
 - Replay-stream strip: `assistant/message.data.stream` becomes `[]` in the
   first frame (not deleted, because clients iterate it). Transcripts render from
   `data.message` and usage comes from `data.usage`, so visible content is
@@ -118,6 +126,8 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_FORCE` | `0` | Rewrite every initial page, even an explicit smaller one. |
 | `DSH_FASTLOAD_MAX_MESSAGES` | `100` | Initial page message cap. |
 | `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Initial page message cap while the Agent is streaming; initial pages only. Set it equal to `MAX_MESSAGES` to disable the running shrink. It never exceeds `MAX_MESSAGES`, so a cap below 24 also narrows the running page instead of widening it. |
+| `DSH_FASTLOAD_RUNNING_MAX_BYTES` | `262144` | Byte budget for the streaming first page, cut at message boundaries by the plugin (the Host pager only cuts at turns). `0` disables it; the floor is 32 KiB; when `MAX_BYTES` is set too, the smaller value wins. |
+| `DSH_FASTLOAD_RUNNING_MIN_MESSAGES` | `4` | Newest messages the running byte cut keeps; if they alone exceed the budget they are kept up to `HARD_CAP_BYTES`. |
 | `DSH_FASTLOAD_MIN_MESSAGES` | `40` | Minimum messages before the turn window may cut. |
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | Target complete turns at the tail; `maxMessages` still caps the page. |
 | `DSH_FASTLOAD_MAX_BYTES` | `0` | Soft byte budget; `0` disables byte trimming. |
@@ -142,7 +152,10 @@ Session's live Agent status: anything but `running` (including a throwing lookup
 whole and a long turn stops at 24 messages. The page cache is skipped as well, because its key
 contains the persistence revision, which moves on every streamed frame, and the real first frame's
 `assistantStream.revision` almost always moves too: the lookup either misses or hits and is then
-dropped. Measured numbers are in `docs/research/streaming-open-latency.md`.
+dropped. Measured numbers are in `docs/research/streaming-open-latency.md`. Because one turn
+can exceed any message window, the running page is then byte-cut at message boundaries; that
+budget is a shrink of `MAX_BYTES` as well, and each cut writes a `trim` line to `serve.log`
+(`at=message`, before/after bytes and records).
 
 Deferral is on by default and applies only when the cache really hits, the request is an initial
 page (no `beforeSeq`/`throughSeq`), `activate !== true`, `assistantStream` has no active attempt,
@@ -345,6 +358,55 @@ page cache cleared so the first run of each label is cold):
 The extension merges only when the previous page ends exactly at the current
 page's first `seq`, and only one page is pulled in; cache hits still verify
 cursor / revision and replay the delta.
+
+### 2026-11-14 streaming opens (the agent is writing)
+
+When a Session is streaming, the Host's own `follow` still costs only 20–60 ms
+(`open→live` in `serve.log`); the renderer ingesting the whole page is the slow
+part. A page-cache hit actually costs 56–106 ms to unzstd and JSON-parse, so
+streaming opens skip the cache by default. Same host process (pid 4172), same
+frontend build, click on a sidebar row → first transcript row:
+
+| Open target | First page | Click → first row |
+|---|---:|---:|
+| Streaming (running 24-message window, page cache off) | — (not recorded) | 105 / 118 / 119 / 109 / 176 ms |
+| Settled heavy Session (100-message window, cache hit) | 951 records | 277 / 274 / 284 ms |
+
+This is a cross-Session comparison: the streaming Sessions were still early and
+served a smaller page anyway; an on/off A/B inside one Session needs environment
+changes and a host restart, which this round did not do.
+
+First-page payload for the same Session (`session-0333c160…`, replaying the Host
+pager plus this plugin's compact/strip/trim over the real log):
+
+| Request | Records | Wire bytes |
+|---|---:|---:|
+| Idle default 100/40/2 | 958 | 4.0 MiB |
+| Running 24/24/1 (stage 9) | 239 | 451 KiB |
+| + `RUNNING_MAX_BYTES` = 256 KiB (stage 10) | 141 | 232 KiB |
+
+Numbers are a snapshot from around 2026-11-14 17:00; the Session keeps growing,
+so a replay drifts. The running byte trim makes the first page ~18× smaller than
+the idle 100-message window and another ~2× smaller than the 24-message window.
+
+#### Isolated-instance A/B (2026-11-14 17:40)
+
+Cross-Session numbers are not clean enough, so a second DSH instance was started
+with its own `DSH_HOME`, a random port and a local mock LLM, seeded with the real
+heavy Session log and its attachments. A live turn with 25 tool rounds (40 KB
+result each) runs inside it, both arms `cache=off`:
+
+| Arm | First-page payload | Click → first row (5 runs) |
+|---|---:|---|
+| A: stage 9 24-message window only (`RUNNING_MAX_BYTES=0`) | 593–878 KB | 54 / 42 / 42 / 45 / 50 ms |
+| B: stage 10, 256 KiB byte trim | 249–252 KB | 38 / 39 / 34 / 33 / 39 ms |
+
+Same Session in `serve.log`: arm A logs `mode=running max=24 turns=24/1 cache=off`; every
+arm B page has `trim … at=message bytes=593493->252011 records=137->34`. Arm B was measured
+with about 400 flowItems already in the DOM (the Session had been opened in full earlier)
+while arm A had 33, so B's lead is a conservative lower bound.
+
+Both arms only change the "open a Session that is streaming" path.
 
 Per-item assessment, reasons for the items not implemented and the upstream
 proposals are in `docs/research/dsh-first-open-p1-p8-assessment.md`.
