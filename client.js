@@ -618,6 +618,7 @@ const INSTRUMENT = DIAG && DEBUG;
             scans: 0,
             loads: 0,
             skipped: 0,
+            runningSkips: 0,
             last: null,
             blank: null,
             healed: 0,
@@ -993,6 +994,28 @@ const INSTRUMENT = DIAG && DEBUG;
               return button instanceof HTMLButtonElement ? button : null;
             };
 
+            // A running Session is served a deliberately short window, so its
+            // transcript often fits one screen and the scroll test below would
+            // press the page button. That press asks the Host for a normal
+            // idle-sized page: measured 5.2-5.7 MiB, one second after a 250 KiB
+            // open. It undoes the very trim that made the open fast, and the
+            // user is watching the tail grow anyway. The running bit is a
+            // Session capability (host relay through the retained binding), not
+            // a guess about the DOM.
+            const runningSession = () => {
+              try {
+                const id = currentSessionId();
+                if (id === '') return false;
+                const sessions = ctx && typeof ctx.get === 'function' ? ctx.get('sessions') : undefined;
+                const binding = sessions && typeof sessions.binding === 'function' ? sessions.binding(id) : undefined;
+                const session = binding && binding.session ? binding.session : binding;
+                const snapshot = session && typeof session.getSnapshot === 'function' ? session.getSnapshot() : null;
+                return !!(snapshot && snapshot.running === true);
+              } catch {
+                return false;
+              }
+            };
+
             const schedule = (flow, attempt) => {
               const timer = setTimeout(() => {
                 timers.delete(timer);
@@ -1001,6 +1024,11 @@ const INSTRUMENT = DIAG && DEBUG;
                   // A blank transcript already lost its window; pressing the page
                   // button would only leave it disabled forever.
                   if (flow.hasAttribute('data-fastload-blank')) return;
+                  if (runningSession()) {
+                    state.runningSkips += 1;
+                    state.last = { action: 'skip-running', attempt };
+                    return;
+                  }
                   if (document.visibilityState === 'hidden') {
                     if (attempt < MAX_ATTEMPTS) schedule(flow, attempt + 1);
                     return;
@@ -2242,7 +2270,7 @@ const INSTRUMENT = DIAG && DEBUG;
                 flows,
                 slotErrors: [...document.querySelectorAll('[data-slot-error]')].map((node) => node.getAttribute('data-slot-error')),
                 factoryErrors: [...document.querySelectorAll('[data-factory-error]')].map((node) => node.getAttribute('data-factory-error')),
-                client: { build: BUILD, lazyGroups: state.lazyGroups, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, healed: state.healed, repairs: state.repairs, advance: state.advance, prewarm: state.prewarm, restorePrewarm: state.restorePrewarm, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error },
+                client: { build: BUILD, lazyGroups: state.lazyGroups, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, runningSkips: state.runningSkips, healed: state.healed, repairs: state.repairs, advance: state.advance, prewarm: state.prewarm, restorePrewarm: state.restorePrewarm, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error },
                 fibers: fiberProbe(),
                 feed: sessionFeed(true),
                 conversation: conversationProbe(true),

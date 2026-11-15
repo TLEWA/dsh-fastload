@@ -25,7 +25,8 @@ client session open
   -> optional: first snapshot records trimmed at turn/start boundaries
   -> ChatFlow mounts the smaller page
   -> web client sees a non-scrollable transcript
-  -> presses the built-in "Load older" once (idle, one page per mount)
+  -> (idle only) presses the built-in "Load older" once, one page per mount;
+     a running Session skips this, its page is a trimmed tail on purpose
   -> ChatNavigation.loadEarlier() anchors the viewport, then sends beforeSeq;
      the plugin leaves this page untouched
 ```
@@ -45,7 +46,8 @@ client session open
    re-enabling installs a fresh wrapper with the current config.
 8. The client fill only acts when `scrollHeight <= clientHeight` (plus a
    small slack), only on the transcript flow that owns
-   `data-slot="conversation.chat.flow"`, and only once per mounted flow.
+   `data-slot="conversation.chat.flow"`, and only once per mounted flow. It is
+   skipped entirely while the Session snapshot reports `running` (stage 11).
 
 ## Background fill
 
@@ -370,6 +372,37 @@ pager, then compact/strip and trim): a 256 KiB budget keeps 141 records /
 232 KiB — about 2× smaller than the 24-message page and ~18× smaller than the
 idle 100-message page. Every cut writes a `serve.log` line
 (`trim sid=… at=message bytes=…->… records=…->… cut=…`).
+
+## Running auto-fill guard (stage 11)
+
+Stage 10 made the running first page small enough to fit one screen. That is
+also the exact condition stage 8's background fill waits for, so the fill fired
+about a second after every streaming open and asked the Host for an *idle*
+sized page. On the recorded Session (session-0333c160, 2026-11-15 isolated
+instance, mock Agent streaming):
+
+| open | first row | extra requests after open | decoded bytes | rows after 4.5 s |
+| --- | --- | --- | --- | --- |
+| fill allowed | 36-44 ms | 2 at +1.0-1.35 s | ~5.2-5.7 MiB | 158-172 |
+| fill skipped | 36-121 ms | 0 | 0 | 8-12 |
+
+The fill ran `button.click()` from a 900 ms timer, so the cost landed while the
+user was reading the tail: two page requests, about 5 MiB decoded and 150+ extra
+rows. The trim was undone by the plugin itself.
+
+The guard reads the running bit from the Session snapshot
+(`sessions.binding(id).session.getSnapshot().running`), which the Host relays
+through the retained binding. It is a capability-detected private read: the
+lookup, the property and the method are all `typeof`-checked and wrapped in
+`try/catch`, and any failure falls back to the stage-8 behaviour. The decision is
+recorded as `action: 'skip-running'` in diagnostics and counted in
+`client.runningSkips`.
+
+A running page therefore keeps showing the trimmed tail and nothing else; the
+"Load older" button stays available for the user, and the next mount after the
+turn ends fills normally. Verified on the isolated instance: the running opens
+produced zero page requests and zero long tasks, while an idle mount still
+evaluates the scroll test as before.
 
 ## CSS content-visibility (stage 4, NO-GO)
 
