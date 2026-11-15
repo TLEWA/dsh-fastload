@@ -25,6 +25,9 @@ stage 9（本 PR）处理 1 和 2：Agent 处于 `running` 时把初始页窗口
 并默认跳过页缓存读写；页缓存只保存“首帧没有进行中 attempt”的稳定页。3 仍然存在，
 记录在文末的后续方向里。
 
+后续阶段：stage 10 补上了单 turn 会话的字节裁剪（消息边界 256 KiB），stage 11 又
+发现裁剪出来的短页会触发客户端自动补页，把 5 MiB 拉回来——见下文“stage 11”。
+
 ## 观测手段
 
 - `$DSH_HOME/cache/dsh-fastload/serve.log`：插件每次 `follow` 一行，含请求参数、
@@ -143,13 +146,37 @@ attempt 的 delta 数），属于残余成本。
 取舍：流式期窗口只覆盖最后 24 条消息，更早的历史由内置“加载更早”补回（插件不改
 分页语义）；`DSH_FASTLOAD_RUNNING_MAX_MESSAGES=100` 即可恢复旧行为。
 
+## stage 11：裁剪被自动补页抵消
+
+stage 10 之后运行期首屏降到 250 KiB 左右，但页面高度也只剩一屏（折叠的工具结果
+很矮）。stage 8 的自动补页判定是 `scrollHeight <= clientHeight + 16`，于是刚好
+命中：打开 900 ms 后客户端按下内置“加载更早”，而这个按钮用的是**空闲**分页参数
+（`max=100`、`turns=40/2`），宿主把那个巨大的单 turn 整段返回。隔离实例复现 5 次：
+
+| 首屏 | 首次 DOM 插入 | 补页请求 | 解码字节 | 4.5 s 后 items |
+| --- | --- | --- | --- | --- |
+| 250 KiB | 36–44 ms | 2 次，+1.0–1.35 s | 约 5.2–5.7 MiB | 158–172 |
+| 250 KiB（拦截 click） | 36–121 ms | 0 | 0 | 8–12 |
+
+按键路径在 `client.js` 的 `schedule()`：900 ms 定时器 → 判定不可滚动 → 找
+“加载更早”按钮 → `button.click()`。计时器触发时用户正在读尾部，所以感知上就是
+“打开很快，一秒后卡一下”，而总字节数比空闲打开还多——裁剪被插件自己抵消了。
+
+修法（stage 11）：`schedule()` 在 blank 检查之后读 Session 快照的 `running` 位，
+正在输出时直接 return，诊断记 `action: 'skip-running'` 并累加
+`client.runningSkips`。运行位来自 `sessions.binding(id).session.getSnapshot()`
+（宿主经保留绑定转发的快照），是 capability 检测的私有读：`ctx.get`、
+`binding`、`getSnapshot` 全部 `typeof` 检查并裹在 `try/catch` 里，任何一步失败
+都回退 stage 8 的行为。没有选宿主侧夹分页请求，因为初始页裁剪是仓内不变量，
+而分页页按 `before` 游标返回，裁字节会切掉与当前视图相邻的最新部分造成断层。
+
+实测：有守卫的运行期打开零分页请求、零 long task、items 稳定 8–12；空闲挂载仍按
+旧的滚动判定走（`skip-scrollable`），补页照常。
+
 ## 未做与后续方向
 
-- **字节裁剪的消息对齐切点（PR2）**：`planTrim` 现在只能切 `turn/start`，单 turn
-  会话完全失效。宿主 `paginate` 自己允许页首落在消息的 `groupStart`，所以把切点
-  扩大到“消息 groupStart ∪ turn/start”，并在轮次规则不满足时降级到消息规则，是
-  与宿主语义一致的做法；同时把“全量 stringify 求总量”改成从尾部累加，避免给首帧
-  加 10–20 ms。配套加 `runningMaxBytes`（1 MiB）作运行期安全网。
+- **字节裁剪的消息对齐切点**已由 stage 10 实现（`planMessageTrim`），配套
+  `runningMaxBytes`（默认 256 KiB）与 `runningMinMessages`（默认 4）。
 - **transient 展开与装配成本**：可以在客户端侧观察/裁剪，但涉及宿主私有接口与行为
   风险，留待单独评审。
 - **真正的真机 A/B**：需要重启用户的 GUI（本 PR 未做，避免打断正在进行的工作）。

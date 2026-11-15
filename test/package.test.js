@@ -24,6 +24,27 @@ test('client registers a module and keeps the auto-fill contract', async () => {
 });
 
 
+test('a running transcript never presses the auto-fill button', async () => {
+  const source = await readFile(clientUrl, 'utf8');
+  // The running bit has to come from the Session snapshot (Host relay through
+  // the retained binding), with every private step capability-checked.
+  assert.match(source, /const runningSession = \(\) => \{/);
+  assert.match(source, /ctx\.get\('sessions'\)/);
+  assert.match(source, /sessions\.binding\(id\)/);
+  assert.match(source, /getSnapshot\(\)/);
+  assert.match(source, /snapshot.running === true/);
+  // The skip must run before the transcript is measured or pressed, and it must
+  // leave a trace: a silently dead guard is a regression in disguise.
+  assert.match(source, /if \(runningSession\(\)\) \{\s*state\.runningSkips \+= 1;\s*state\.last = \{ action: 'skip-running', attempt \};\s*return;/);
+  const skip = source.indexOf("action: 'skip-running'");
+  const press = source.indexOf('button.click()');
+  assert.ok(skip > 0 && press > skip, 'the running skip precedes the page press');
+  // The counter is part of the diagnostics snapshot, so a real session can be
+  // checked without enabling console forensics.
+  assert.match(source, /runningSkips: 0,/);
+  assert.match(source, /runningSkips: state.runningSkips/);
+});
+
 test('the diagnostic layer is opt-in and silent on the default path', async () => {
   const source = await readFile(clientUrl, 'utf8');
   assert.match(source, /const DIAG_KEY = 'dsh-fastload\.diagnostics'/);

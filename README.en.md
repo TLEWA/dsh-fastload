@@ -44,6 +44,14 @@ the log files themselves are never modified.
   `ChatNavigation.loadEarlier()`, so the viewport anchor is preserved and the
   tail context becomes the same as stock 500/50/2. If the first page already
   scrolls, it does nothing: the newest content is already at the bottom.
+- No background fill while the Agent is running: that first page is a
+  deliberately short tail window, and pressing "Load older" asks the Host for a
+  full idle-sized page. Measured on one Session: 1.0-1.35 s after a 250 KiB
+  open the fill issued two requests, ~5.2-5.7 MiB decoded, and the transcript
+  grew from 9 to 158-172 rows — undoing the trim exactly when the user is only
+  watching the tail. The running bit comes from the Session snapshot
+  (`snapshot.running`, relayed by the Host through the retained binding), not
+  from a DOM guess; the next mount after the turn ends fills as usual.
 - Rewind-aware first page: when the initial page contains a complete `/rewind`
   pair and every message in it is hidden by the rewind plugin's cut ranges, one
   more page is prepended (at most once) so the very first dispatch already
@@ -116,7 +124,9 @@ the log files themselves are never modified.
 - It does not delete history: "load older" still pages backwards with the
   original request semantics.
 - The background fill is one page per mounted transcript and only when the
-  viewport is short; it is not a general auto-pagination loop.
+  viewport is short; it is not a general auto-pagination loop. It is skipped
+  outright while the Session runs: that page is a trimmed tail window, and
+  filling it would restore the full idle-sized page.
 
 ### Configuration
 

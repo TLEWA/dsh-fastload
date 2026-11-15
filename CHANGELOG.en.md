@@ -32,6 +32,15 @@ All notable changes are documented here. Versions follow
 
 ### Fixed
 
+- **No background fill while a Session runs.** Once the streaming opening page is trimmed down
+  to a tail window it often fits exactly one screen, which triggered the existing "not scrollable,
+  fill one page" rule. That fill uses idle window parameters, so the Host returned the whole
+  oversized turn again. Measured in the isolated instance (same Session): 1.0-1.35 s after a
+  250 KiB open, two fill requests delivered ~5.2-5.7 MiB decoded and the transcript grew from
+  9 to 158-172 rows — undoing the trim. The web client now reads the Session snapshot's
+  `running` bit before filling, skips the fill while the Agent writes (recorded as
+  `skip-running` in diagnostics), and fills as usual on the next mount after the turn ends.
+  A failed capability check falls back to the old behaviour.
 - **Only settled pages are cached.** A first frame whose `assistantStream` still carries an
   active attempt is no longer stored: that snapshot is stale on the next chunk. Previously every
   streaming open wrote a full page that was invalid immediately (201 files / 33 MB in 25 minutes,
