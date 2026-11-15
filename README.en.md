@@ -384,7 +384,8 @@ frontend build, click on a sidebar row → first transcript row:
 
 This is a cross-Session comparison: the streaming Sessions were still early and
 served a smaller page anyway; an on/off A/B inside one Session needs environment
-changes and a host restart, which this round did not do.
+changes and a host restart, which this round did not do. A later round compared the
+same Session streaming vs idle instead, see below.
 
 First-page payload for the same Session (`session-0333c160…`, replaying the Host
 pager plus this plugin's compact/strip/trim over the real log):
@@ -417,6 +418,28 @@ with about 400 flowItems already in the DOM (the Session had been opened in full
 while arm A had 33, so B's lead is a conservative lower bound.
 
 Both arms only change the "open a Session that is streaming" path.
+
+#### End-to-end check after the merge (2026-11-15, one Session)
+
+Once stage 11 landed on `main` (`bf9aba7`), the same Session
+(`session-0333c160…`, a single huge turn, 5.5 MB log at the time) was opened in the
+second isolated instance both while streaming and while idle: a long-output prompt
+keeps the turn flowing, and its sidebar row is clicked back and forth.
+
+| Arm | First page | Click → first DOM insert | long task | DOM items | Page requests after open |
+|---|---|---:|---:|---:|---:|
+| Streaming (3 runs) | `max=24 turns=24/1`, about 250 KiB | 34 / 45 / 37 ms | 62 / 54 / 52 ms | 12–15 | 0 |
+| Idle, cold (383 records) | `max=100 turns=40/2` | 83 ms | 52 ms | 82 | 0 |
+| Idle, cache hit | same, `hit` +13 ms after open | 79 ms | 51 ms | 82 | 0 |
+
+Every streaming open logs `mode=running cache=off` plus a
+`trim … bytes=999288->249822 records=120->30` line; client diagnostics report
+`runningSkips=3` and `loads=0`, and the opened page's `scrollHeight` equals the
+726 px viewport exactly — the condition that used to trigger the auto-fill, now
+stopped by the guard. The two page requests totalling 5.2–5.7 MiB are gone, and so
+is the "opens fast, freezes a second later" feel. Streaming opens a first row
+faster than idle ones, because the first page only carries the trailing ~250 KiB
+window.
 
 Per-item assessment, reasons for the items not implemented and the upstream
 proposals are in `docs/research/dsh-first-open-p1-p8-assessment.md`.
