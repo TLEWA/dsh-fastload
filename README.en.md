@@ -110,6 +110,15 @@ the log files themselves are never modified.
   measured) while keeping at least `DSH_FASTLOAD_RUNNING_MIN_MESSAGES` (4) of
   the newest messages. Older history still comes back through "Load older", and
   idle opens keep the turn-aligned trim.
+- Trim-decision telemetry: with only `trim` lines, a running open that wrote no
+  trim line could mean "the page already fit", "the budget is off", or "the cut was
+  refused", and telling them apart required replaying the log. Every running open
+  now also writes `trim-skip sid=… at=message|turn bytes=… records=… budget=…
+  reason=…`, where reason is `budget-off`, `under-budget` or `no-cut-point`.
+  Session status and policy are separate flags: with
+  `RUNNING_MAX_BYTES=0` the line still says `budget-off`, and `runningTrims`
+  counts only cuts the running budget actually made. An idle open without
+  `MAX_BYTES` writes nothing, so the default log stays quiet.
 - Replay-stream strip: `assistant/message.data.stream` becomes `[]` in the
   first frame (not deleted, because clients iterate it). Transcripts render from
   `data.message` and usage comes from `data.usage`, so visible content is

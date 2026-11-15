@@ -404,6 +404,39 @@ turn ends fills normally. Verified on the isolated instance: the running opens
 produced zero page requests and zero long tasks, while an idle mount still
 evaluates the scroll test as before.
 
+## Trim decision telemetry (stage 12)
+
+Stages 9-11 leave a blind spot in `serve.log`: a running open that produces no
+`trim` line is ambiguous. It can mean the page already fit the budget, the
+budget was disabled, or the cut had to be refused — and on the reporting GUI
+(pid 25084, 2026-11-15) all eighteen streaming opens that minute wrote no trim
+line while stage 10 was demonstrably working on the same build. Reproducing
+each one meant replaying the log with `event.time` truncation to reconstruct
+the page the Host had actually produced.
+
+The trim step now always reports its decision for a running open:
+
+1. `measureRecords(records)` in `src/trim.js` returns the record count and the
+   same byte measure the budget uses, so the reported size and the budget are
+   directly comparable.
+2. `noteSkippedTrim` writes `trim-skip sid=… at=message|turn bytes=… records=…
+   budget=… reason=…` with one of three reasons: `budget-off` (no budget
+   applies to this open), `under-budget` (page fits, correctly left alone) and
+   `no-cut-point` (a cut was needed but the message floor or hard cap refused
+   it).
+3. Session status and policy are separate flags: a running open with
+   `DSH_FASTLOAD_RUNNING_MAX_BYTES=0` still reports `budget-off` instead of
+   silently falling back to the idle shape. `runningTrims` only counts cuts the
+   running budget actually made, so an operator `MAX_BYTES` cut is never
+   mislabelled as a running cut.
+4. An idle open with no operator budget writes nothing, so the default log
+   stays as quiet as before.
+
+Counters land in diagnostics as `state.trimSkips` and `state.lastTrimSkip`.
+Verified on the recorded Session: the 24-message window at the click instant
+was 195 records / 208.6 KiB, i.e. `under-budget`, which is why the GUI's
+streaming opens wrote no trim line.
+
 ## CSS content-visibility (stage 4, NO-GO)
 
 Candidate E applied `content-visibility: auto` plus measured `contain-intrinsic-size` to

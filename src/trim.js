@@ -39,6 +39,26 @@ function suffixSizes(sizes) {
 }
 
 /**
+ * Wire size of a record list.
+ *
+ * A decision *not* to cut is only actionable when the page size is known: a
+ * quiet serve.log cannot tell "the page fit the budget" from "no budget was
+ * configured". Callers pay this only on opens that would otherwise be silent.
+ *
+ * @param {readonly object[]} records wire records of a snapshot page.
+ * @returns {{records: number, bytes: number}}
+ */
+export function measureRecords(records) {
+  let bytes = 0;
+  let count = 0;
+  for (const record of Array.isArray(records) ? records : []) {
+    bytes += byteLength(record);
+    count += 1;
+  }
+  return { records: count, bytes };
+}
+
+/**
  * Cut the page at a *message* boundary instead of a turn boundary.
  *
  * A message count bounds how many messages a page starts with, not how many

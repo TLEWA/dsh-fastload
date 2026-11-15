@@ -1116,6 +1116,142 @@ test('an idle page keeps the whole single-turn history when no budget is set', a
 });
 
 
+test('a running page that already fits the budget records why no cut happened', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-trim-skip-'));
+  const persistence = { stat: async () => ({ revision: 'rev-skip' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '0',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+        DSH_FASTLOAD_RUNNING_MAX_BYTES: '32768',
+      },
+      async () => {
+        const harness = makeContext({
+          services: {
+            sessionPersistence: persistence,
+            agents: { get: () => ({ status: 'running' }) },
+          },
+        });
+        const { ctx, sc } = harness;
+        sc.follow = async function* () {
+          yield runningPage();
+        };
+        const before = Number(globalThis.__DSH_FASTLOAD__?.trimSkips) || 0;
+        apply(ctx);
+
+        await sc
+          .follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-skip' } })
+          .next();
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.equal(state.trimSkips - before, 1, 'the open is recorded');
+        assert.equal(state.lastTrimSkip.reason, 'under-budget');
+        assert.equal(state.lastTrimSkip.budget, 32768);
+        assert.equal(state.lastTrimSkip.cutAt, 'message');
+        assert.equal(state.lastTrimSkip.records, 2);
+        assert.equal(state.lastTrimSkip.sessionId, 'session-skip');
+        const log = await fsp.readFile(path.join(dir, 'serve.log'), 'utf8');
+        assert.match(
+          log,
+          /trim-skip sid=session-skip at=message bytes=\d+ records=2 budget=32768 reason=under-budget/
+        );
+        harness.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('a running page with the byte budget disabled records budget-off', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-trim-off-'));
+  const persistence = { stat: async () => ({ revision: 'rev-off' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '0',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+        DSH_FASTLOAD_RUNNING_MAX_BYTES: '0',
+      },
+      async () => {
+        const harness = makeContext({
+          services: {
+            sessionPersistence: persistence,
+            agents: { get: () => ({ status: 'running' }) },
+          },
+        });
+        const { ctx, sc } = harness;
+        sc.follow = async function* () {
+          yield runningPage();
+        };
+        const beforeTrims = Number(globalThis.__DSH_FASTLOAD__?.runningTrims) || 0;
+        apply(ctx);
+
+        const first = await sc
+          .follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-off' } })
+          .next();
+        assert.equal(first.value.records.length, 2, 'no budget means no cut');
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.equal(state.lastTrimSkip.reason, 'budget-off');
+        assert.equal(state.lastTrimSkip.budget, 0);
+        assert.equal(
+          Number(state.runningTrims) || 0,
+          beforeTrims,
+          'a disabled running budget never counts as a running cut'
+        );
+        harness.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
+test('an idle page without a byte budget stays quiet', async () => {
+  const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-trim-quiet-'));
+  const persistence = { stat: async () => ({ revision: 'rev-quiet' }), open: async () => ({}) };
+  try {
+    await withEnv(
+      {
+        DSH_FASTLOAD_ENABLED: '1',
+        DSH_FASTLOAD_MAX_BYTES: '0',
+        DSH_FASTLOAD_PAGE_CACHE: '0',
+        DSH_FASTLOAD_CACHE_DIR: dir,
+        DSH_FASTLOAD_RUNNING_MAX_BYTES: '32768',
+      },
+      async () => {
+        const harness = makeContext({
+          services: {
+            sessionPersistence: persistence,
+            agents: { get: () => ({ status: 'idle' }) },
+          },
+        });
+        const { ctx, sc } = harness;
+        sc.follow = async function* () {
+          yield runningPage();
+        };
+        const before = Number(globalThis.__DSH_FASTLOAD__?.trimSkips) || 0;
+        apply(ctx);
+
+        await sc
+          .follow({ maxMessages: 500, address: { kind: 'session', sessionId: 'session-quiet' } })
+          .next();
+        const state = globalThis.__DSH_FASTLOAD__;
+        assert.equal(state.trimSkips - before, 0, 'an idle open with no budget writes nothing');
+        const log = await fsp.readFile(path.join(dir, 'serve.log'), 'utf8');
+        assert.doesNotMatch(log, /trim-skip/, 'no telemetry noise for the default idle path');
+        harness.dispose();
+      }
+    );
+  } finally {
+    await cleanupDir(dir);
+  }
+});
+
 test('a running Session opens the small window and skips the page cache', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-running-'));
   const persistence = { stat: async () => ({ revision: 'rev-running' }), open: async () => ({}) };

@@ -16,7 +16,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { readConfig } from './src/config.js';
 import { isInitialPage } from './src/page.js';
-import { planTrim } from './src/trim.js';
+import { planTrim, measureRecords } from './src/trim.js';
 import { planCompact } from './src/compact.js';
 import { installScanCache } from './src/scan-cache.js';
 import { createPageCache } from './src/page-cache.js';
@@ -517,6 +517,36 @@ function withRunningBudget(config) {
 
 function wrapFirstSnapshot(result, config, state, ctx, extension, options = {}) {
   const { running = false, log, sessionId } = options;
+  // The Session status and the policy picked for it are two facts: a running
+  // open with the byte budget disabled still has to say the budget was off
+  // instead of looking like a page that quietly fit.
+  const runningBudget = running && Number(config.runningMaxBytes) > 0;
+  // A page that needs no cut still says something: without this line a quiet
+  // serve.log cannot tell a disabled budget from a page that simply fit, and
+  // the same reproduction then has to be repeated with debug logging on.
+  const noteSkippedTrim = (page, budgetOptions, isRunning) => {
+    const budget = Number(budgetOptions.maxBytes) > 0 ? Math.floor(Number(budgetOptions.maxBytes)) : 0;
+    // Idle opens without an operator budget are the common case and stay quiet.
+    if (!isRunning && budget <= 0) return;
+    const measured = measureRecords(page && page.records);
+    const reason = budget <= 0 ? 'budget-off' : measured.bytes <= budget ? 'under-budget' : 'no-cut-point';
+    state.trimSkips = (state.trimSkips || 0) + 1;
+    state.lastTrimSkip = {
+      sessionId: sessionId ?? null,
+      cutAt: isRunning ? 'message' : 'turn',
+      bytes: measured.bytes,
+      records: measured.records,
+      budget,
+      reason,
+    };
+    try {
+      log?.write(
+        'trim-skip sid=' + (sessionId ?? '-') + ' at=' + (isRunning ? 'message' : 'turn') +
+          ' bytes=' + measured.bytes + ' records=' + measured.records +
+          ' budget=' + budget + ' reason=' + reason
+      );
+    } catch {}
+  };
   const trimFrame = (frame, protectSeq) => {
     const compacted = planCompact(frame, config);
     if (compacted.info) {
@@ -531,13 +561,16 @@ function wrapFirstSnapshot(result, config, state, ctx, extension, options = {}) 
         } catch {}
       }
     }
-    const base = running ? withRunningBudget(config) : config;
+    const base = runningBudget ? withRunningBudget(config) : config;
     const trimOptions = Number.isFinite(protectSeq) ? { ...base, protectSeq } : base;
     const { opening, info } = planTrim(compacted.opening, trimOptions);
-    if (!info) return opening;
+    if (!info) {
+      noteSkippedTrim(opening, base, running);
+      return opening;
+    }
     state.trims += 1;
     state.lastTrim = info;
-    if (running) state.runningTrims = (state.runningTrims || 0) + 1;
+    if (runningBudget) state.runningTrims = (state.runningTrims || 0) + 1;
     try {
       log?.write(
         'trim sid=' + (sessionId ?? '-') + ' at=' + (info.cutAt || 'turn') +
@@ -589,7 +622,7 @@ function wrapFirstSnapshot(result, config, state, ctx, extension, options = {}) 
   return result;
 }
 
-const STATE_VERSION = '0.2.2';
+const STATE_VERSION = '0.2.3';
 const CORDIS_ORIGINAL = Symbol.for('cordis.original');
 
 /**
@@ -607,6 +640,8 @@ function reuseState() {
     installed: false,
     trims: 0,
     lastTrim: null,
+    trimSkips: 0,
+    lastTrimSkip: null,
     pageCache: null,
     compacts: 0,
     lastCompact: null,
@@ -842,8 +877,9 @@ export function apply(ctx, options) {
         // A running page is byte-bounded by the plugin itself: the Host pager
         // cannot cut inside a turn, so one long turn would otherwise hand the
         // renderer megabytes that no message window can shrink.
-        const runningTrim = running && config.runningMaxBytes > 0;
-        const wantTrim = config.maxBytes > 0 || config.stripStream || runningTrim;
+        // A running open always passes through the trim step, even when its
+        // budget is off: the step is where the "why no cut" line comes from.
+        const wantTrim = config.maxBytes > 0 || config.stripStream || running;
         // `next` already carries the narrowed window, so reuse the decision
         // made against the original request instead of re-testing it here.
         const wantExtend = config.rewindAware && initial;
@@ -852,7 +888,7 @@ export function apply(ctx, options) {
           : null;
         const trimmed = initial && (wantTrim || wantExtend)
           ? wrapFirstSnapshot(result, config, state, ctx, extension, {
-              running: runningTrim,
+              running,
               log: serveLog,
               sessionId: requestSessionId,
             })
