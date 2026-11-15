@@ -80,6 +80,12 @@ firstAnchor 看起来很快，实际上是一个空页。
   再裁一次：默认整页不超过 `DSH_FASTLOAD_RUNNING_MAX_BYTES`（256 KiB；实测 141 条记录 /
   232 KiB），并至少保留 `DSH_FASTLOAD_RUNNING_MIN_MESSAGES`（4）条最新消息；更早内容仍由
   “加载更早”补回。空闲打开不受影响，仍按 turn 语义裁切。
+- 裁剪决策遥测：只写 `trim` 行时，一次运行期打开“没有 trim”无法区分三种情况——
+  页面本来就小于预算、预算被关掉、或者找不到可切的点。现在每次运行期打开都会补一行
+  `trim-skip sid=… at=message|turn bytes=… records=… budget=… reason=…`，reason 为
+  `budget-off` / `under-budget` / `no-cut-point`。Session 状态与裁剪策略是两个标志：
+  `RUNNING_MAX_BYTES=0` 时仍记 `budget-off`，`runningTrims` 只统计运行期预算真正做出的
+  裁切；空闲且未配 `MAX_BYTES` 的打开不写这一行，默认日志保持安静。
 - replay stream 剥离：首帧里 `assistant/message.data.stream` 被替换成 `[]`
   （不是删除键，客户端会直接迭代它）。transcript 从 `data.message` 渲染、
   用量从 `data.usage` 读，所以可见内容不变。

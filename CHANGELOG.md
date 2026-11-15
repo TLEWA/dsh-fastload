@@ -20,6 +20,14 @@
   239 条记录 / 451 KiB）。运行期首屏因此在**消息边界**再裁一次，默认保留最新 4 条消息
   （`DSH_FASTLOAD_RUNNING_MIN_MESSAGES`）且整页不超过 256 KiB（实测 141 条记录 / 232 KiB）；
   这些消息本身超预算时优先保留到 `HARD_CAP_BYTES`。空闲打开不变，仍按 turn 语义裁切。
+- **裁剪决策遥测（`serve.log` 的 `trim-skip` 行）。** 运行期打开没有 `trim` 行时，
+  原先无法区分“页面本来就小于预算”“预算被关掉”“找不到可切的点”。现在每次运行期打开都
+  写一行 `trim-skip sid=… at=message|turn bytes=… records=… budget=… reason=…`
+  （`budget-off` / `under-budget` / `no-cut-point`），并计入诊断的 `trimSkips` 与
+  `lastTrimSkip`。Session 状态与裁剪策略拆成两个标志：`RUNNING_MAX_BYTES=0` 时仍记
+  `budget-off`，`runningTrims` 只统计运行期预算真正做出的裁切。空闲且未配 `MAX_BYTES`
+  的打开不写这一行。真机复核：点击时刻的 24 条窗口是 195 条记录 / 208.6 KiB，因此判为
+  `under-budget`——这正是该宿主多次运行期打开没有裁剪的原因。
 - **流式期默认跳过页缓存（`DSH_FASTLOAD_RUNNING_PAGE_CACHE`，默认 `0`）。** 缓存键含
   persistence revision，流式期每帧都变；命中后真实首帧的 `assistantStream.revision`
   也几乎必然前进，结果是命中即丢弃并整页重开。运行期改为既不读也不写。
