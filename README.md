@@ -375,6 +375,7 @@ flowItem（此前整页打开过一次），A 臂只有 33 个，所以 B 的领
 - **[dsh-sidebar-row-menu](https://github.com/TLEWA/dsh-sidebar-row-menu)** —— 侧栏行右键菜单：工作区行、会话行与会话正文各有自己的右键菜单，含「打开方式」「更多操作」二级菜单。
 - **[dsh-utf8-output](https://github.com/TLEWA/dsh-utf8-output)** —— 修复 Windows 下 DSH 子进程 GBK/CP936/GB18030 输出乱码。
 - **[dsh-ptc-noargs](https://github.com/TLEWA/dsh-ptc-noargs)** —— 修复 PTC `run_code` 中无参工具调用被拒绝的问题：把省略或 `undefined` 的首参归一化为 `{}`。
+- **[dsh-ps51-guard](https://github.com/TLEWA/dsh-ps51-guard)** —— 通过 `ops_bash` 调用的 Windows PowerShell 5.1 护栏：UTF-16LE 传输保护、兼容改写与执行结果归一化（脚手架阶段）。
 
 ## 许可证
 
