@@ -18,24 +18,28 @@ All notable changes are documented here. Versions follow
   0.63 MiB (−73% events, −83% bytes). The running window only ever shrinks: its effective value
   is `min(MAX_MESSAGES, RUNNING_MAX_MESSAGES)`, so a `MAX_MESSAGES` cap below 24 narrows the
   streaming page instead of widening it.
-- **A running byte budget (`DSH_FASTLOAD_RUNNING_MAX_BYTES`, default 256 KiB).** A message
+- **A running byte budget (`DSH_FASTLOAD_RUNNING_MAX_BYTES`, default `0`, off).** A message
   window bounds messages, not bytes: tool/dispatch events travel with each message, so 24
   messages can still be a few hundred KiB (measured: 239 records / 451 KiB on the same
-  Session). The streaming page is therefore cut again at **message** boundaries: at least
-  the newest 4 messages (`DSH_FASTLOAD_RUNNING_MIN_MESSAGES`) are kept and the page stays
-  under 256 KiB (141 records / 232 KiB measured); if those messages alone exceed the budget
-  they are kept up to `HARD_CAP_BYTES`. Idle opens are unchanged and keep the turn-aligned trim.
+  Session). It used to cut to 256 KiB at **message** boundaries by default (141 records /
+  232 KiB measured), but a byte cut can only drop whole message groups: on the recorded
+  Session the worst 24-message window is 1806 KiB, a 4-message floor still keeps 558 KiB
+  and 12 messages keep 1034 KiB — the window shrinks sharply while the page stays far over
+  budget. The default is therefore no cut and a fixed 24-message window; operators who need
+  a hard ceiling can set a positive value, which still cuts at message boundaries and keeps
+  at least the newest 4 messages (`DSH_FASTLOAD_RUNNING_MIN_MESSAGES`), kept up to
+  `HARD_CAP_BYTES` when they alone exceed the budget. Idle opens are unchanged and keep the
+  turn-aligned trim.
 - **Trim-decision telemetry (`trim-skip` in `serve.log`).** A running open
-  without a `trim` line used to leave three cases indistinguishable: the page
-  already fit, the budget was off, or the cut was refused. Every running open now
-  writes `trim-skip sid=… at=message|turn bytes=… records=… budget=… reason=…`
-  (`budget-off` / `under-budget` / `no-cut-point`) and bumps the `trimSkips` /
-  `lastTrimSkip` diagnostics. Session status and policy are separate flags, so
-  `RUNNING_MAX_BYTES=0` still reports `budget-off` and `runningTrims` only counts
-  cuts the running budget made. An idle open without `MAX_BYTES` writes nothing.
-  Checked against the recorded Session: the 24-message window at the click instant
-  was 195 records / 208.6 KiB, hence `under-budget` — the reason that GUI's
-  streaming opens never trimmed.
+  without a `trim` line used to leave "the page already fit" and "the cut was
+  refused" indistinguishable. With a positive budget, every running open now writes
+  `trim-skip sid=… at=message bytes=… records=… budget=… reason=…`
+  (`under-budget` / `no-cut-point`) and bumps the `trimSkips` / `lastTrimSkip`
+  diagnostics. The budget being off (the default) or an idle open writes nothing, and
+  `runningTrims` only counts cuts the running budget made. Checked against the
+  recorded Session: the 24-message window at the click instant was 195 records /
+  208.6 KiB, hence `under-budget` — the reason that GUI's streaming opens never
+  trimmed.
 - **The page cache is skipped while streaming (`DSH_FASTLOAD_RUNNING_PAGE_CACHE`, default
   `0`).** The cache key contains the persistence revision, which moves on every streamed frame,
   and the real first frame's `assistantStream.revision` almost always moves as well, so a hit is

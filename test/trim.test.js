@@ -318,15 +318,15 @@ test('message-aligned cut still honours the hard cap for the protected tail', ()
 
 test('running byte budget defaults are parsed and clamped', () => {
   const config = readConfig({});
-  assert.equal(config.runningMaxBytes, 256 * 1024);
+  // Off by default: the budget can only enforce itself by dropping message
+  // groups, which shrinks the very window it is meant to protect.
+  assert.equal(config.runningMaxBytes, 0);
   assert.equal(config.runningMinMessages, 4);
   // A nonzero budget below the floor is raised to 32 KiB; 0 disables the cut.
   assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MAX_BYTES: '1024' }).runningMaxBytes, 32 * 1024);
   assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MAX_BYTES: '0' }).runningMaxBytes, 0);
-  assert.equal(
-    readConfig({ DSH_FASTLOAD_RUNNING_MAX_BYTES: 'nope' }).runningMaxBytes,
-    256 * 1024
-  );
+  // An unusable value falls back to the default, which is now "off" too.
+  assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MAX_BYTES: 'nope' }).runningMaxBytes, 0);
   assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MIN_MESSAGES: '2' }).runningMinMessages, 2);
   assert.equal(readConfig({ DSH_FASTLOAD_RUNNING_MIN_MESSAGES: '0' }).runningMinMessages, 4);
 });

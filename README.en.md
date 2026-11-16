@@ -102,23 +102,26 @@ the log files themselves are never modified.
   the model streams, the user only reads the tail, and older history comes back
   through the built-in "Load older" with unchanged semantics. The next open after
   the turn settles returns to the 100-message window.
-- Running byte budget: a message window counts messages, not bytes, and each
-  message drags the tool/dispatch events around it, so 24 messages can still be
-  a few hundred KiB (measured: 239 records / 451 KiB on the same Session).
-  Streaming pages are therefore also cut at **message** boundaries: the page
-  stays under `DSH_FASTLOAD_RUNNING_MAX_BYTES` (256 KiB; 141 records / 232 KiB
-  measured) while keeping at least `DSH_FASTLOAD_RUNNING_MIN_MESSAGES` (4) of
-  the newest messages. Older history still comes back through "Load older", and
-  idle opens keep the turn-aligned trim.
+- Running byte budget (opt-in, off by default): a message window counts messages,
+  not bytes, and each message drags the tool/dispatch events around it, so 24
+  messages can still be a few hundred KiB (measured: 239 records / 451 KiB on the
+  same Session). A byte cut can only drop whole message groups, so the window
+  itself shrinks: on the recorded Session the worst 24-message window is 1806 KiB,
+  and even a 4-message floor is 558 KiB (12 messages: 1034 KiB). The window gets
+  smaller while the page stays far over budget. `DSH_FASTLOAD_RUNNING_MAX_BYTES`
+  therefore defaults to `0` (no cut) and the running window stays at 24 messages;
+  operators who need a hard ceiling can set a positive value, which cuts at
+  **message** boundaries and keeps at least
+  `DSH_FASTLOAD_RUNNING_MIN_MESSAGES` (4) of the newest messages. Older history
+  still comes back through "Load older", and idle opens keep the turn-aligned trim.
 - Trim-decision telemetry: with only `trim` lines, a running open that wrote no
-  trim line could mean "the page already fit", "the budget is off", or "the cut was
-  refused", and telling them apart required replaying the log. Every running open
-  now also writes `trim-skip sid=… at=message|turn bytes=… records=… budget=…
-  reason=…`, where reason is `budget-off`, `under-budget` or `no-cut-point`.
-  Session status and policy are separate flags: with
-  `RUNNING_MAX_BYTES=0` the line still says `budget-off`, and `runningTrims`
-  counts only cuts the running budget actually made. An idle open without
-  `MAX_BYTES` writes nothing, so the default log stays quiet.
+  trim line could mean "the page already fit" or "the cut was refused", and telling
+  them apart required replaying the log. With a positive budget, every running open
+  also writes `trim-skip sid=… at=message bytes=… records=… budget=… reason=…`,
+  where reason is `under-budget` or `no-cut-point`, and bumps the `trimSkips`
+  / `lastTrimSkip` diagnostics. The budget being off (the default) or an idle
+  open writes nothing, so the default log stays quiet; `runningTrims` counts only
+  cuts the running budget actually made.
 - Replay-stream strip: `assistant/message.data.stream` becomes `[]` in the
   first frame (not deleted, because clients iterate it). Transcripts render from
   `data.message` and usage comes from `data.usage`, so visible content is
@@ -145,7 +148,7 @@ the log files themselves are never modified.
 | `DSH_FASTLOAD_FORCE` | `0` | Rewrite every initial page, even an explicit smaller one. |
 | `DSH_FASTLOAD_MAX_MESSAGES` | `100` | Initial page message cap. |
 | `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Initial page message cap while the Agent is streaming; initial pages only. Set it equal to `MAX_MESSAGES` to disable the running shrink. It never exceeds `MAX_MESSAGES`, so a cap below 24 also narrows the running page instead of widening it. |
-| `DSH_FASTLOAD_RUNNING_MAX_BYTES` | `262144` | Byte budget for the streaming first page, cut at message boundaries by the plugin (the Host pager only cuts at turns). `0` disables it; the floor is 32 KiB; when `MAX_BYTES` is set too, the smaller value wins. |
+| `DSH_FASTLOAD_RUNNING_MAX_BYTES` | `0` | Byte budget for the streaming first page, cut at message boundaries by the plugin (the Host pager only cuts at turns). Off by default: a cut can only drop whole message groups, which shrinks the window itself. Set a positive value to enable it; the floor is 32 KiB and, when `MAX_BYTES` is set too, the smaller value wins. |
 | `DSH_FASTLOAD_RUNNING_MIN_MESSAGES` | `4` | Newest messages the running byte cut keeps; if they alone exceed the budget they are kept up to `HARD_CAP_BYTES`. |
 | `DSH_FASTLOAD_MIN_MESSAGES` | `40` | Minimum messages before the turn window may cut. |
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | Target complete turns at the tail; `maxMessages` still caps the page. |
@@ -172,9 +175,10 @@ whole and a long turn stops at 24 messages. The page cache is skipped as well, b
 contains the persistence revision, which moves on every streamed frame, and the real first frame's
 `assistantStream.revision` almost always moves too: the lookup either misses or hits and is then
 dropped. Measured numbers are in `docs/research/streaming-open-latency.md`. Because one turn
-can exceed any message window, the running page is then byte-cut at message boundaries; that
-budget is a shrink of `MAX_BYTES` as well, and each cut writes a `trim` line to `serve.log`
-(`at=message`, before/after bytes and records).
+can exceed any message window, a configured `RUNNING_MAX_BYTES` also byte-cuts the running
+page at message boundaries; that budget is a shrink of `MAX_BYTES` as well, and each cut writes
+a `trim` line to `serve.log` (`at=message`, before/after bytes and records). With the default
+(no budget) the page stays at the 24-message window.
 
 Deferral is on by default and applies only when the cache really hits, the request is an initial
 page (no `beforeSeq`/`throughSeq`), `activate !== true`, `assistantStream` has no active attempt,
@@ -403,11 +407,13 @@ pager plus this plugin's compact/strip/trim over the real log):
 |---|---:|---:|
 | Idle default 100/40/2 | 958 | 4.0 MiB |
 | Running 24/24/1 (stage 9) | 239 | 451 KiB |
-| + `RUNNING_MAX_BYTES` = 256 KiB (stage 10) | 141 | 232 KiB |
+| + `RUNNING_MAX_BYTES` = 256 KiB (stage 10, opt-in) | 141 | 232 KiB |
 
 Numbers are a snapshot from around 2026-11-14 17:00; the Session keeps growing,
-so a replay drifts. The running byte trim makes the first page ~18× smaller than
-the idle 100-message window and another ~2× smaller than the 24-message window.
+so a replay drifts. Stage 9's 24-message window makes the first page ~18× smaller
+than the idle 100-message window; stage 10's byte budget makes it another ~2×
+smaller, but it is off by default (see "Running byte budget" above), and the two
+arms below measured that budget enabled.
 
 #### Isolated-instance A/B (2026-11-14 17:40)
 
@@ -426,7 +432,11 @@ arm B page has `trim … at=message bytes=593493->252011 records=137->34`. Arm B
 with about 400 flowItems already in the DOM (the Session had been opened in full earlier)
 while arm A had 33, so B's lead is a conservative lower bound.
 
-Both arms only change the "open a Session that is streaming" path.
+Both arms only change the "open a Session that is streaming" path. The stage 10 budget
+has been off by default since 2026-11-16: it gets the page down to ~250 KiB, but only
+by shrinking the window from 24 messages to 4-12. On the worst recorded page (1806 KiB)
+a smaller window does not get under budget anyway, so keeping the window and enabling
+the budget on demand is the better trade.
 
 #### End-to-end check after the merge (2026-11-15, one Session)
 

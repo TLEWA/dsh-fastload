@@ -75,17 +75,19 @@ firstAnchor 看起来很快，实际上是一个空页。
   （`DSH_FASTLOAD_RUNNING_PAGE_CACHE=0`）。工具密集的 turn 里 100 条消息可以是
   900 多条事件、数 MB 的首帧；正在输出时用户只看尾部，更早的历史由“加载更早”
   按原语义补回。turn 结束后的下一次打开自动恢复 100 条窗口。
-- 运行期字节上限：消息窗口按条数算，工具/派发事件会随消息一起进来，24 条消息仍可能
-  带回数百 KiB 的首帧（实测同一会话 239 条记录 / 451 KiB）。运行期首屏因此在**消息边界**
-  再裁一次：默认整页不超过 `DSH_FASTLOAD_RUNNING_MAX_BYTES`（256 KiB；实测 141 条记录 /
-  232 KiB），并至少保留 `DSH_FASTLOAD_RUNNING_MIN_MESSAGES`（4）条最新消息；更早内容仍由
-  “加载更早”补回。空闲打开不受影响，仍按 turn 语义裁切。
-- 裁剪决策遥测：只写 `trim` 行时，一次运行期打开“没有 trim”无法区分三种情况——
-  页面本来就小于预算、预算被关掉、或者找不到可切的点。现在每次运行期打开都会补一行
-  `trim-skip sid=… at=message|turn bytes=… records=… budget=… reason=…`，reason 为
-  `budget-off` / `under-budget` / `no-cut-point`。Session 状态与裁剪策略是两个标志：
-  `RUNNING_MAX_BYTES=0` 时仍记 `budget-off`，`runningTrims` 只统计运行期预算真正做出的
-  裁切；空闲且未配 `MAX_BYTES` 的打开不写这一行，默认日志保持安静。
+- 运行期字节上限（可选，默认关闭）：消息窗口按条数算，工具/派发事件会随消息一起进来，
+  24 条消息仍可能带回数百 KiB 的首帧（实测同一会话 239 条记录 / 451 KiB）。字节裁剪只能
+  整组丢弃消息，窗口会随之变小；真机重放里最坏的 24 条窗口是 1806 KiB，而保留 4 条仍有
+  558 KiB、保留 12 条 1034 KiB——窗口明显缩小，字节却仍远超预算。因此
+  `DSH_FASTLOAD_RUNNING_MAX_BYTES` 默认 `0`（不裁），首屏窗口恒为 24 条；需要硬上限的环境
+  可显式设成正数，切点仍在**消息边界**，并至少保留 `DSH_FASTLOAD_RUNNING_MIN_MESSAGES`
+  （4）条最新消息，更早内容由“加载更早”补回。空闲打开不受影响，仍按 turn 语义裁切。
+- 裁剪决策遥测：只写 `trim` 行时，一次运行期打开“没有 trim”无法区分两种情况——
+  页面本来就小于预算，或者找不到可切的点。配置了正数预算时，每次运行期打开都会补一行
+  `trim-skip sid=… at=message bytes=… records=… budget=… reason=…`，reason 为
+  `under-budget` / `no-cut-point`，并计入诊断的 `trimSkips` 与 `lastTrimSkip`。
+  预算关闭（默认）或空闲打开不写这一行，默认日志保持安静；`runningTrims` 只统计运行期
+  预算真正做出的裁切。
 - replay stream 剥离：首帧里 `assistant/message.data.stream` 被替换成 `[]`
   （不是删除键，客户端会直接迭代它）。transcript 从 `data.message` 渲染、
   用量从 `data.usage` 读，所以可见内容不变。
@@ -107,7 +109,7 @@ firstAnchor 看起来很快，实际上是一个空页。
 | `DSH_FASTLOAD_FORCE` | `0` | 强制改写所有首屏，包括显式的小页。 |
 | `DSH_FASTLOAD_MAX_MESSAGES` | `100` | 首屏消息上限。 |
 | `DSH_FASTLOAD_RUNNING_MAX_MESSAGES` | `24` | Agent 正在输出时的首屏消息上限；只作用于初始页。设为与 `MAX_MESSAGES` 相同即关闭运行期收缩。该值不会超过 `MAX_MESSAGES`：把 `MAX_MESSAGES` 调到 24 以下时会同时压低运行期窗口，而不是把首屏放大。 |
-| `DSH_FASTLOAD_RUNNING_MAX_BYTES` | `262144` | Agent 正在输出时的首屏字节预算，由插件在消息边界裁切（Host 分页只能按 turn 切）。`0` 关闭；最小 32 KiB；与 `MAX_BYTES` 同时设置时取更小值。 |
+| `DSH_FASTLOAD_RUNNING_MAX_BYTES` | `0` | Agent 正在输出时的首屏字节预算，由插件在消息边界裁切（Host 分页只能按 turn 切）。默认关闭：字节裁剪只能整组丢消息、会缩小首屏窗口；设为正值才启用，最小 32 KiB，与 `MAX_BYTES` 同时设置时取更小值。 |
 | `DSH_FASTLOAD_RUNNING_MIN_MESSAGES` | `4` | 运行期字节裁剪至少保留的最新消息数；这些消息本身超预算时优先保留，直到 `HARD_CAP_BYTES`。 |
 | `DSH_FASTLOAD_MIN_MESSAGES` | `40` | turnWindow 允许裁切前的最小消息数。 |
 | `DSH_FASTLOAD_MIN_TURNS` | `2` | turnWindow 目标保留的尾部 turn 数；仍受 `maxMessages` 硬上限约束。 |
@@ -132,9 +134,10 @@ Session 的实时 Agent 状态：状态不是 `running`（含查询抛错）时�
 即短 turn 整段保留、长 turn 最多 24 条消息。页缓存默认同时跳过，因为缓存键里的
 persistence revision 在流式期每帧都在变，命中后真实首帧的 `assistantStream.revision`
 也几乎必然前进，结果要么未命中、要么命中即丢弃。实测数据见
-`docs/research/streaming-open-latency.md`。一个 turn 可以超过任何消息窗口，因此运行期
-首屏还会在消息边界按 `RUNNING_MAX_BYTES` 再裁一次；该预算同样只收缩不放大（与
+`docs/research/streaming-open-latency.md`。一个 turn 可以超过任何消息窗口；显式配置
+`RUNNING_MAX_BYTES` 时，运行期首屏还会在消息边界再裁一次，该预算只收缩不放大（与
 `MAX_BYTES` 同设时取更小值），每次裁切写一条 `serve.log`（`at=message`、前后字节与记录数）。
+默认不裁，窗口恒为 24 条。
 
 延后默认开启，只有缓存确实命中、请求为初始页（无 `beforeSeq`/`throughSeq`）、
 `activate !== true`、`assistantStream` 没有进行中的 attempt，且能确认 Agent 空闲时才生效。
@@ -320,10 +323,11 @@ cursor / revision 校验并补发增量。
 |---|---:|---:|
 | 空闲默认 100/40/2 | 958 | 4.0 MiB |
 | 运行期 24/24/1（阶段 9） | 239 | 451 KiB |
-| + `RUNNING_MAX_BYTES` = 256 KiB（阶段 10） | 141 | 232 KiB |
+| + `RUNNING_MAX_BYTES` = 256 KiB（阶段 10，可选） | 141 | 232 KiB |
 
-数字是 2026-11-14 17:00 左右的日志快照（会话仍在增长，重放会随之变化）。运行期字节
-裁剪让首屏比空闲 100 条窗口小约 18×、比 24 条窗口再小约 2×。
+数字是 2026-11-14 17:00 左右的日志快照（会话仍在增长，重放会随之变化）。阶段 9 的
+24 条窗口让首屏比空闲 100 条窗口小约 18×；阶段 10 的字节预算再小约 2×，但它默认关闭
+（见上文“运行期字节上限”），下表两臂测的就是该预算开启时的收益。
 
 #### 隔离实例 A/B（2026-11-14 17:40）
 
@@ -340,7 +344,9 @@ LLM），把真实重型会话日志和附件复制进去，在会话里跑一�
 `trim … at=message bytes=593493->252011 records=137->34`。B 臂量测时 DOM 里已累计约 400 个
 flowItem（此前整页打开过一次），A 臂只有 33 个，所以 B 的领先是个偏保守的下界。
 
-两臂都只影响“点进正在输出的会话”这一条路径。
+两臂都只影响“点进正在输出的会话”这一条路径。阶段 10 的预算自 2026-11-16 起默认
+关闭：它能把首屏压到约 250 KiB，但代价是窗口从 24 条缩到 4–12 条；对本机最坏页
+（1806 KiB）来说，缩小窗口并不能换来“低于预算”，因此保留窗口、按需开启预算更划算。
 
 #### 合并后端到端复核（2026-11-15，同一会话）
 
