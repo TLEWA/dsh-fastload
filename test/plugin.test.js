@@ -1165,17 +1165,18 @@ test('a running page that already fits the budget records why no cut happened', 
   }
 });
 
-test('a running page with the byte budget disabled records budget-off', async () => {
+test('a running page with the default byte budget writes no trim-skip', async () => {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), 'dsh-fastload-trim-off-'));
   const persistence = { stat: async () => ({ revision: 'rev-off' }), open: async () => ({}) };
   try {
     await withEnv(
       {
         DSH_FASTLOAD_ENABLED: '1',
-        DSH_FASTLOAD_MAX_BYTES: '0',
+        // An operator byte budget must not masquerade as a running budget: the
+        // running page is turn-trimmed like an idle one and stays quiet.
+        DSH_FASTLOAD_MAX_BYTES: '1048576',
         DSH_FASTLOAD_PAGE_CACHE: '0',
         DSH_FASTLOAD_CACHE_DIR: dir,
-        DSH_FASTLOAD_RUNNING_MAX_BYTES: '0',
       },
       async () => {
         const harness = makeContext({
@@ -1189,6 +1190,7 @@ test('a running page with the byte budget disabled records budget-off', async ()
           yield runningPage();
         };
         const beforeTrims = Number(globalThis.__DSH_FASTLOAD__?.runningTrims) || 0;
+        const beforeSkips = Number(globalThis.__DSH_FASTLOAD__?.trimSkips) || 0;
         apply(ctx);
 
         const first = await sc
@@ -1196,13 +1198,19 @@ test('a running page with the byte budget disabled records budget-off', async ()
           .next();
         assert.equal(first.value.records.length, 2, 'no budget means no cut');
         const state = globalThis.__DSH_FASTLOAD__;
-        assert.equal(state.lastTrimSkip.reason, 'budget-off');
-        assert.equal(state.lastTrimSkip.budget, 0);
+        assert.equal(
+          Number(state.trimSkips) || 0,
+          beforeSkips,
+          'the default running open reports no decision'
+        );
         assert.equal(
           Number(state.runningTrims) || 0,
           beforeTrims,
           'a disabled running budget never counts as a running cut'
         );
+        const log = await fsp.readFile(path.join(dir, 'serve.log'), 'utf8');
+        assert.doesNotMatch(log, /trim-skip/);
+        assert.doesNotMatch(log, /trim sid=/);
         harness.dispose();
       }
     );

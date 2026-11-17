@@ -517,23 +517,24 @@ function withRunningBudget(config) {
 
 function wrapFirstSnapshot(result, config, state, ctx, extension, options = {}) {
   const { running = false, log, sessionId } = options;
-  // The Session status and the policy picked for it are two facts: a running
-  // open with the byte budget disabled still has to say the budget was off
-  // instead of looking like a page that quietly fit.
+  // The Session status and the policy picked for it are two facts: the running
+  // window exists even when its byte budget is off, and only a positive budget
+  // can produce a cut.
   const runningBudget = running && Number(config.runningMaxBytes) > 0;
   // A page that needs no cut still says something: without this line a quiet
-  // serve.log cannot tell a disabled budget from a page that simply fit, and
-  // the same reproduction then has to be repeated with debug logging on.
-  const noteSkippedTrim = (page, budgetOptions, isRunning) => {
+  // serve.log cannot tell a page that fit from a cut that was refused, and the
+  // same reproduction then has to be repeated with debug logging on. Only a
+  // positive running budget has a decision to report; the default (no budget)
+  // and every idle open stay quiet so the log keeps its meaning.
+  const noteSkippedTrim = (page, budgetOptions, budgetApplies) => {
     const budget = Number(budgetOptions.maxBytes) > 0 ? Math.floor(Number(budgetOptions.maxBytes)) : 0;
-    // Idle opens without an operator budget are the common case and stay quiet.
-    if (!isRunning && budget <= 0) return;
+    if (!budgetApplies || budget <= 0) return;
     const measured = measureRecords(page && page.records);
-    const reason = budget <= 0 ? 'budget-off' : measured.bytes <= budget ? 'under-budget' : 'no-cut-point';
+    const reason = measured.bytes <= budget ? 'under-budget' : 'no-cut-point';
     state.trimSkips = (state.trimSkips || 0) + 1;
     state.lastTrimSkip = {
       sessionId: sessionId ?? null,
-      cutAt: isRunning ? 'message' : 'turn',
+      cutAt: 'message',
       bytes: measured.bytes,
       records: measured.records,
       budget,
@@ -541,7 +542,7 @@ function wrapFirstSnapshot(result, config, state, ctx, extension, options = {}) 
     };
     try {
       log?.write(
-        'trim-skip sid=' + (sessionId ?? '-') + ' at=' + (isRunning ? 'message' : 'turn') +
+        'trim-skip sid=' + (sessionId ?? '-') + ' at=message' +
           ' bytes=' + measured.bytes + ' records=' + measured.records +
           ' budget=' + budget + ' reason=' + reason
       );
@@ -565,7 +566,7 @@ function wrapFirstSnapshot(result, config, state, ctx, extension, options = {}) 
     const trimOptions = Number.isFinite(protectSeq) ? { ...base, protectSeq } : base;
     const { opening, info } = planTrim(compacted.opening, trimOptions);
     if (!info) {
-      noteSkippedTrim(opening, base, running);
+      noteSkippedTrim(opening, base, runningBudget);
       return opening;
     }
     state.trims += 1;
@@ -874,12 +875,12 @@ export function apply(ctx, options) {
 
         const startedAt = config.debug ? process.hrtime.bigint() : 0n;
         const result = original.call(this, next, signal);
-        // A running page is byte-bounded by the plugin itself: the Host pager
-        // cannot cut inside a turn, so one long turn would otherwise hand the
-        // renderer megabytes that no message window can shrink.
-        // A running open always passes through the trim step, even when its
-        // budget is off: the step is where the "why no cut" line comes from.
-        const wantTrim = config.maxBytes > 0 || config.stripStream || running;
+        // A running page is byte-bounded by the plugin itself only when the
+        // operator opted into a budget: the Host pager cannot cut inside a
+        // turn, and the plugin's own cut drops whole message groups, so the
+        // default keeps the window intact and leaves the bytes unbounded.
+        const runningTrim = running && Number(config.runningMaxBytes) > 0;
+        const wantTrim = config.maxBytes > 0 || config.stripStream || runningTrim;
         // `next` already carries the narrowed window, so reuse the decision
         // made against the original request instead of re-testing it here.
         const wantExtend = config.rewindAware && initial;

@@ -15,19 +15,21 @@
   （`beforeSeq`/`throughSeq`）保持原窗口。实测同一会话（166 条 assistant 消息、248 条 PTC 派发事件）：100 条窗口 = 912 条事件 / 3.63 MiB，24 条窗口 = 243 条事件 /
   0.63 MiB（事件数 −73%，字节 −83%）。运行期窗口是收缩而不是放大：其有效值取
   `min(MAX_MESSAGES, RUNNING_MAX_MESSAGES)`，因此把 `MAX_MESSAGES` 设到 24 以下时首屏不会反而变大。
-- **运行期字节上限（`DSH_FASTLOAD_RUNNING_MAX_BYTES`，默认 256 KiB）。** 消息窗口只约束
+- **运行期字节上限（`DSH_FASTLOAD_RUNNING_MAX_BYTES`，默认 `0` 关闭）。** 消息窗口只约束
   条数：工具/派发事件会随消息一起进入首屏，24 条消息仍可能是数百 KiB（实测同一会话
-  239 条记录 / 451 KiB）。运行期首屏因此在**消息边界**再裁一次，默认保留最新 4 条消息
-  （`DSH_FASTLOAD_RUNNING_MIN_MESSAGES`）且整页不超过 256 KiB（实测 141 条记录 / 232 KiB）；
-  这些消息本身超预算时优先保留到 `HARD_CAP_BYTES`。空闲打开不变，仍按 turn 语义裁切。
+  239 条记录 / 451 KiB）。曾默认在**消息边界**裁到 256 KiB（实测 141 条记录 / 232 KiB），
+  但字节裁剪只能整组丢消息：真机重放里最坏的 24 条窗口是 1806 KiB，保留 4 条仍有 558 KiB、
+  保留 12 条 1034 KiB——窗口显著缩小，字节仍远超预算。因此改为默认不裁、窗口恒为 24 条；
+  需要硬上限时显式设正值，切点仍按消息边界并保留最新 4 条消息
+  （`DSH_FASTLOAD_RUNNING_MIN_MESSAGES`），这些消息本身超预算时优先保留到 `HARD_CAP_BYTES`。
+  空闲打开不变，仍按 turn 语义裁切。
 - **裁剪决策遥测（`serve.log` 的 `trim-skip` 行）。** 运行期打开没有 `trim` 行时，
-  原先无法区分“页面本来就小于预算”“预算被关掉”“找不到可切的点”。现在每次运行期打开都
-  写一行 `trim-skip sid=… at=message|turn bytes=… records=… budget=… reason=…`
-  （`budget-off` / `under-budget` / `no-cut-point`），并计入诊断的 `trimSkips` 与
-  `lastTrimSkip`。Session 状态与裁剪策略拆成两个标志：`RUNNING_MAX_BYTES=0` 时仍记
-  `budget-off`，`runningTrims` 只统计运行期预算真正做出的裁切。空闲且未配 `MAX_BYTES`
-  的打开不写这一行。真机复核：点击时刻的 24 条窗口是 195 条记录 / 208.6 KiB，因此判为
-  `under-budget`——这正是该宿主多次运行期打开没有裁剪的原因。
+  原先无法区分“页面本来就小于预算”和“找不到可切的点”。配置了正数预算时，每次运行期
+  打开都写一行 `trim-skip sid=… at=message bytes=… records=… budget=… reason=…`
+  （`under-budget` / `no-cut-point`），并计入诊断的 `trimSkips` 与 `lastTrimSkip`。
+  预算关闭（默认）或空闲打开不写这一行；`runningTrims` 只统计运行期预算真正做出的裁切。
+  真机复核：点击时刻的 24 条窗口是 195 条记录 / 208.6 KiB，因此判为 `under-budget`——
+  这正是该宿主多次运行期打开没有裁剪的原因。
 - **流式期默认跳过页缓存（`DSH_FASTLOAD_RUNNING_PAGE_CACHE`，默认 `0`）。** 缓存键含
   persistence revision，流式期每帧都变；命中后真实首帧的 `assistantStream.revision`
   也几乎必然前进，结果是命中即丢弃并整页重开。运行期改为既不读也不写。

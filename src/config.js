@@ -7,9 +7,11 @@ export const DEFAULTS = Object.freeze({
   // smaller and is refilled by the built-in "load older" pager.
   runningMaxMessages: 24,
   // The Host pager can only cut at turn boundaries, so a single long turn
-  // still returns megabytes even with the small running window. This budget is
-  // enforced by the plugin itself, at message boundaries, on the initial page.
-  runningMaxBytes: 256 * 1024,
+  // still returns megabytes even with the small running window. A byte budget
+  // can only enforce itself by dropping whole message groups, which shrinks
+  // the window itself; that trade is opt-in, so the default keeps the window
+  // intact and only bounds it by message count.
+  runningMaxBytes: 0,
   runningMinMessages: 4,
   minMessages: 40,
   minTurns: 2,
