@@ -192,6 +192,7 @@ test('byte trim runs on the first snapshot only', async () => {
         yield snapshot(4, 30000);
       };
       apply(ctx);
+      assert.equal(globalThis.__DSH_FASTLOAD__.wrapper, 'public');
 
       const frame = await sc.follow({ maxMessages: 500 }).next();
       assert.equal(frame.value.records.filter((r) => r.event.type === 'turn/start').length, 2);
@@ -332,6 +333,7 @@ test('restores through cordis.original behind a traceable proxy', async () => {
 
     apply(ctx);
     assert.equal(target.__dshFastload, true);
+    assert.equal(globalThis.__DSH_FASTLOAD__.wrapper, 'original');
     assert.notEqual(target.follow, original);
     // A public read goes through the proxy shadow and never compares equal to
     // the installed function, so restores must use the real target.
@@ -346,6 +348,18 @@ test('restores through cordis.original behind a traceable proxy', async () => {
   });
 });
 
+
+test('warns once when cordis.original is unavailable', async () => {
+  await withEnv({ DSH_FASTLOAD_ENABLED: '1', DSH_FASTLOAD_MAX_BYTES: '0' }, async () => {
+    const warnings = [];
+    const { ctx } = makeContext();
+    ctx.logger = { info() {}, warn: (message) => warnings.push(message) };
+    apply(ctx);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0], /cordis\.original/);
+    assert.equal(globalThis.__DSH_FASTLOAD__.wrapper, 'public');
+  });
+});
 
 test('a wrapper another plugin holds is switched off instead of stacking', async () => {
   const { ctx, sc, calls, dispose } = makeContext();

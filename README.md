@@ -63,6 +63,10 @@ firstAnchor 看起来很快，实际上是一个空页。
   也不挂载。需要取证时打开 `localStorage['dsh-fastload.diagnostics'] = '1'`（或
   `window.__DSH_FASTLOAD_DIAGNOSTICS__ = true`）；原型 patch 还要叠加
   `dsh-fastload.debug`。关闭诊断不改变补页、空白自愈、错误恢复和两种预热。
+- 安装位置回退：`sessionController.follow` 的 wrapper 优先装到 `cordis.original` 背后的原始
+  服务上；宿主不再暴露该符号时退回公开对象，诊断记 `wrapper: 'public'`，并经
+  `ctx.logger.warn` 提示一次，而不是静默装到一个可能不生效的影子对象上。正常宿主记
+  `wrapper: 'original'`。
 - 会话头索引：`session/list` 对未变化的会话文件直接复用上次解析出的 header，
   并把一次启动内的重复列表请求合成一次；索引写入 1.5 秒防抖、原子替换，
   文件大小或 mtime 变了自然失效。

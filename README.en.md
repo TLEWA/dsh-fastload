@@ -84,6 +84,11 @@ the log files themselves are never modified.
   prototype patching probe also needs `dsh-fastload.debug`. Turning diagnostics
   off does not change the fill, blank healing, error recovery or either prewarm
   path.
+- Install target fallback: the `sessionController.follow` wrapper prefers the raw
+  service behind `cordis.original`. If the Host stops exposing that symbol, the
+  wrapper falls back to the public object, diagnostics record `wrapper: 'public'`
+  and `ctx.logger.warn` reports it once, instead of silently wrapping a shadow
+  object that may never take effect. A normal Host records `wrapper: 'original'`.
 - Header index: `session/list` reuses the previously decoded header for session
   files whose size and mtime did not change, and coalesces repeated list requests
   within one boot. The index is written with a 1.5 s debounce and an atomic
