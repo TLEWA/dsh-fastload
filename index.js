@@ -625,6 +625,10 @@ function wrapFirstSnapshot(result, config, state, ctx, extension, options = {}) 
 
 const STATE_VERSION = '0.2.3';
 const CORDIS_ORIGINAL = Symbol.for('cordis.original');
+// A service that already reported a missing cordis.original is warned about
+// once, so a Host that stops exposing the raw service says so on the first
+// install instead of on every reload.
+const warnedFallbacks = new WeakSet();
 
 /**
  * Reuse the diagnostics object for the same version so a wrapper left over from
@@ -652,6 +656,7 @@ function reuseState() {
     runningTrims: 0,
     rewindExtends: 0,
     idleRefresh: null,
+    wrapper: null,
     error: null,
   };
   globalThis.__DSH_FASTLOAD__ = state;
@@ -662,9 +667,32 @@ function reuseState() {
  * Raw service behind cordis's traceable proxy. Reads through that proxy create
  * a fresh shadow for every function property, so restored functions must be
  * compared and written on the target, never on the public object.
+ *
+ * A missing symbol means the Host no longer exposes the raw service. Writing
+ * the wrapper through the public object would only touch a shadow, so the
+ * fallback is recorded in diagnostics and warned about once through the context
+ * logger instead of failing silently.
  */
-function installTarget(service) {
-  return (service && service[CORDIS_ORIGINAL]) || service;
+function installTarget(service, state, logger) {
+  if (!service) {
+    state.wrapper = null;
+    return service;
+  }
+  const original = service[CORDIS_ORIGINAL];
+  if (original) {
+    state.wrapper = 'original';
+    return original;
+  }
+  state.wrapper = 'public';
+  if (typeof service === 'object' && !warnedFallbacks.has(service)) {
+    warnedFallbacks.add(service);
+    try {
+      logger?.warn?.(
+        '[dsh-fastload] cordis.original is unavailable on sessionController; the follow wrapper was installed on the public object and only takes effect when that object is the raw service'
+      );
+    } catch {}
+  }
+  return service;
 }
 
 /**
@@ -681,6 +709,7 @@ export function apply(ctx, options) {
   state.config = config;
   state.installed = false;
   state.error = null;
+  state.wrapper = null;
   // The diagnostics object is reused across installs of the same version, so a
   // counter added in a later build can be missing on a hot reload.
   if (!Number.isFinite(state.runningOpens)) state.runningOpens = 0;
@@ -719,7 +748,7 @@ export function apply(ctx, options) {
       return;
     }
 
-    const target = installTarget(sc);
+    const target = installTarget(sc, state, ctx.logger);
 
     // Diagnostics: one line per follow decision so an empty transcript can be
     // traced to the page that was (or was not) served for it.

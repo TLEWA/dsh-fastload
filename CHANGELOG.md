@@ -36,6 +36,7 @@
 
 ### 修复
 
+- **`cordis.original` 缺失时不再静默退化。** 安装 `sessionController.follow` wrapper 时，若宿主不再暴露原始服务，插件此前会静默改写在公开对象上（可能只改到影子、完全不生效）。现在诊断对象记录 `wrapper: 'original' | 'public'`，退回公开对象时经 `ctx.logger.warn` 提示一次。回归测试：`warns once when cordis.original is unavailable`。
 - **运行期不再自动补页。** 运行期首屏被裁成尾部小窗口后，页面常常恰好一屏高，
   于是触发“不可滚动就补一页”的既有逻辑；而补页请求走的是空闲窗口参数，Host 会把
   那个巨大的 turn 整段拉回来。隔离实例实测（同一会话）：250 KiB 首屏之后

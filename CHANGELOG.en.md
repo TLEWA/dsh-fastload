@@ -47,6 +47,11 @@ All notable changes are documented here. Versions follow
 
 ### Fixed
 
+- **A missing `cordis.original` no longer degrades silently.** When the Host stops exposing
+  the raw service, the plugin used to wrap the public object silently, which may only touch a
+  shadow and never take effect. Diagnostics now record `wrapper: 'original' | 'public'` and a
+  fallback warns once through `ctx.logger.warn`. Regression test:
+  `warns once when cordis.original is unavailable`.
 - **No background fill while a Session runs.** Once the streaming opening page is trimmed down
   to a tail window it often fits exactly one screen, which triggered the existing "not scrollable,
   fill one page" rule. That fill uses idle window parameters, so the Host returned the whole

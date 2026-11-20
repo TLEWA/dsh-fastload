@@ -43,7 +43,10 @@ client session open
    `__dshFastload` and never wrapped twice. The marker and the wrapper live on
    the raw service behind cordis's traceable proxy and are removed through
    `ctx.effect`'s disposer when the plugin is disabled, unloaded, or reloaded;
-   re-enabling installs a fresh wrapper with the current config.
+   re-enabling installs a fresh wrapper with the current config. If the raw
+   service is unreachable (`cordis.original` missing), the wrapper is installed
+   on the public object, `state.wrapper` records `public`, and the context
+   logger warns once; a normal Host records `wrapper: 'original'`.
 8. The client fill only acts when `scrollHeight <= clientHeight` (plus a
    small slack), only on the transcript flow that owns
    `data-slot="conversation.chat.flow"`, and only once per mounted flow. It is
