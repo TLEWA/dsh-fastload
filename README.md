@@ -386,6 +386,7 @@ flowItem（此前整页打开过一次），A 臂只有 33 个，所以 B 的领
 - **[dsh-utf8-output](https://github.com/TLEWA/dsh-utf8-output)** —— 修复 Windows 下 DSH 子进程 GBK/CP936/GB18030 输出乱码。
 - **[dsh-ptc-noargs](https://github.com/TLEWA/dsh-ptc-noargs)** —— 修复 PTC `run_code` 中无参工具调用被拒绝的问题：把省略或 `undefined` 的首参归一化为 `{}`。
 - **[dsh-ps51-guard](https://github.com/TLEWA/dsh-ps51-guard)** —— 通过 `ops_bash` 调用的 Windows PowerShell 5.1 护栏：UTF-16LE 传输保护、兼容改写与执行结果归一化（脚手架阶段）。
+- **[dsh-image-formats](https://github.com/TLEWA/dsh-image-formats)** —— `read_image` 与 composer 的 AVIF/TIFF/SVG 支持：自动转 PNG 后交给现有附件通道。
 
 ## 许可证
 
