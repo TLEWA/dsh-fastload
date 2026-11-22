@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-22
+
 ### 新增
 
 - **运行期专属首屏窗口（`DSH_FASTLOAD_RUNNING_MAX_MESSAGES`，默认 24）。**
