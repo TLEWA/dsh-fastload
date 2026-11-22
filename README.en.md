@@ -297,6 +297,15 @@ the browser find bar runs; `beforematch` is a fallback.
   switches are off by default; deferred live build is on by default but never delays an
   activating click. Invalid environment values fall back to defaults. Disabling the plugin
   needs no data migration.
+- Every read of the assembler's private fields (`contexts`, `inputs`, `locationIndex`, `views`,
+  `groups`, `viewDefinitions`) goes through one guarded reader: a missing field, a throwing
+  getter or a changed container shape (a Map turned into a plain object) is recorded as a
+  degrade, warned about once per page via `console.warn`, and the transcript then stays on the
+  stock path — no nudge, no rebuild, no re-activation — with no exception reaching the Host.
+  Normal rendering and message ordering are unchanged, and the degrade state is visible on
+  `window.__DSH_FASTLOAD_CLIENT__.assemblerSurface`. See
+  [src/assembler-surface.js](src/assembler-surface.js) and
+  [test/assembler-surface.test.js](test/assembler-surface.test.js).
 - Private-API and unknown-version fallbacks are listed in `AGENTS.md` ("Private APIs and
   capability detection"); the full integration evidence is in
   `docs/research/plugin-optimization-final-report.md`.

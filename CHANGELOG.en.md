@@ -47,6 +47,18 @@ All notable changes are documented here. Versions follow
 
 ### Fixed
 
+- **Assembler private fields are read defensively.** The client used to read the Host
+  assembler's `contexts`, `inputs`, `locationIndex`, `views`, `groups` and `viewDefinitions`
+  directly (all declared `private` in `assembler.ts`, erased at runtime). A host that renames a
+  field, turns one into a throwing getter, or swaps a `Map` for a plain object made those reads
+  throw inside the 500 ms polling loop. Every access now goes through the guarded reader in
+  `src/assembler-surface.js`: existence check, try/catch and shape validation; a failure records
+  one `key:reason` entry, warns once per page through `console.warn`, and degrades that page to
+  the stock path (`assemblyWatch`, `guardCheck` and `healEmptyTranscript` return early, so
+  nothing is nudged or rebuilt). The degrade is visible in `client.surface` in the diagnostics
+  snapshot and on `window.__DSH_FASTLOAD_CLIENT__.assemblerSurface`. Normal output is
+  field-for-field identical to before. Regression tests:
+  `test/assembler-surface.test.js` (five tests, including the missing-field degrade).
 - **A missing `cordis.original` no longer degrades silently.** When the Host stops exposing
   the raw service, the plugin used to wrap the public object silently, which may only touch a
   shadow and never take effect. Diagnostics now record `wrapper: 'original' | 'public'` and a
