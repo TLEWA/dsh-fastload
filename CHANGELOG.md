@@ -36,6 +36,16 @@
 
 ### 修复
 
+- **assembler 私有字段改为防御式读取。** 客户端此前直接读取宿主 assembler 的
+  `contexts` / `inputs` / `locationIndex` / `views` / `groups` / `viewDefinitions`（在
+  `assembler.ts` 里全是 `private`，只是运行时擦除）。宿主改字段名、把字段做成会抛错的
+  getter、或把 `Map` 换成普通对象时，这些读取会在 500 ms 轮询里抛异常。现在全部走
+  `src/assembler-surface.js` 的守卫读取器：存在性检查 + try/catch + 形状校验，失败记一条
+  `key:reason`，`console.warn` 每页只提示一次，并把该页降级为原生路径（`assemblyWatch` /
+  `guardCheck` / `healEmptyTranscript` 直接返回，不再 nudge 或重建）。降级状态在诊断快照的
+  `client.surface` 与 `window.__DSH_FASTLOAD_CLIENT__.assemblerSurface` 里可见。正常路径的
+  输出与改动前逐字段一致。回归测试：`test/assembler-surface.test.js`（5 条，含“字段缺失时
+  降级”）。
 - **`cordis.original` 缺失时不再静默退化。** 安装 `sessionController.follow` wrapper 时，若宿主不再暴露原始服务，插件此前会静默改写在公开对象上（可能只改到影子、完全不生效）。现在诊断对象记录 `wrapper: 'original' | 'public'`，退回公开对象时经 `ctx.logger.warn` 提示一次。回归测试：`warns once when cordis.original is unavailable`。
 - **运行期不再自动补页。** 运行期首屏被裁成尾部小窗口后，页面常常恰好一屏高，
   于是触发“不可滚动就补一页”的既有逻辑；而补页请求走的是空闲窗口参数，Host 会把

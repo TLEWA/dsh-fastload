@@ -229,6 +229,13 @@ Web 端还有五个不进环境变量的开关；前两个极性相反，别写�
   它们不会被 stock 读取，可随时手动删除。插件从不修改会话日志、会话选择或正式 Session Store。
 - 空闲刷新、启动预热、诊断、折叠组懒挂载、渐进补挂默认关闭；延后构建默认开启，但不会延后带 `activate=true` 的真实点击。环境变量非法时回退默认值。
   卸载或关闭开关不需要迁移数据。
+- Web 端读取宿主 assembler 私有字段（`contexts` / `inputs` / `locationIndex` / `views` /
+  `groups` / `viewDefinitions`）全部经同一个守卫读取器：字段缺失、getter 抛错、容器形状变化
+  （Map 变成普通对象）都只记为降级，`console.warn` 每页提示一次，然后退回原生 transcript
+  路径（不 nudge、不重建、不重激活），绝不把异常抛给宿主。正常路径的渲染与提示语序不变；
+  降级状态挂在 `window.__DSH_FASTLOAD_CLIENT__.assemblerSurface` 上可查。实现与用例见
+  [src/assembler-surface.js](src/assembler-surface.js) 与
+  [test/assembler-surface.test.js](test/assembler-surface.test.js)。
 - 私有接口与未知 DSH 版本的降级路径见 `AGENTS.md`「私有接口与能力检测」；完整集成/回归
   证据见 `docs/research/plugin-optimization-final-report.md`。
 

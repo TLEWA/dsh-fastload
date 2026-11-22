@@ -45,7 +45,7 @@
   // Every served module instance stamps its build id into the probe payload:
   // two instances of this client can coexist while a page is being rebuilt,
   // and a stale one would answer the probe with old logic.
-  const BUILD = 'v20';
+  const BUILD = 'v21';
 // Instrumentation patches hot paths (assembler flush, chat builder replace),
 // so it stays off unless explicitly asked for: localStorage
 // 'dsh-fastload.debug' = '1', or window.__DSH_FASTLOAD_DEBUG__ = true.
@@ -1089,6 +1089,7 @@ const INSTRUMENT = DIAG && DEBUG;
               remember('rejection', (reason && (reason.stack || reason.message)) || reason || 'rejection');
             };
             const originalError = console.error;
+            const originalWarn = typeof console.warn === 'function' ? console.warn.bind(console) : null;
             let quietError = null;
             if (DIAG) {
               window.addEventListener('error', onError);
@@ -1534,56 +1535,125 @@ const INSTRUMENT = DIAG && DEBUG;
             // holds no target at all, which renders as an open transcript with
             // a page button and zero rows; reading the assembler separates
             // "installed but never assembled" from "assembled but hidden".
+            // The assembler's fields are private host state: `private` is erased
+            // at runtime, so reading them works today but is not a contract. A
+            // host refactor that renames a field, makes it throw, or swaps a Map
+            // for a plain record must not raise inside a polling loop. Every read
+            // therefore goes through one guarded reader that records the miss and
+            // degrades this page onto the stock transcript path instead.
+            const ASSEMBLER_PRIVATE_FIELDS = ['contexts', 'inputs', 'locationIndex', 'views', 'groups', 'viewDefinitions'];
+            const surfaceWarned = { value: false };
+            const surface = { degraded: false, missing: [], seen: new Set() };
+            const surfaceMiss = (key, reason) => {
+              surface.degraded = true;
+              const id = key + ':' + reason;
+              if (surface.seen.has(id)) return false;
+              surface.seen.add(id);
+              surface.missing.push(id);
+              if (surfaceWarned.value || typeof originalWarn !== 'function') return true;
+              surfaceWarned.value = true;
+              try {
+                originalWarn('[dsh-fastload] assembler surface ' + id + ' is unavailable; keeping the stock transcript path');
+              } catch {}
+              return true;
+            };
+            const surfaceRead = (owner, key, extract) => {
+              if (!owner || (typeof owner !== 'object' && typeof owner !== 'function')) {
+                surfaceMiss(key, 'no-assembler');
+                return { ok: false, reason: 'no-assembler' };
+              }
+              let value;
+              try {
+                value = owner[key];
+              } catch (error) {
+                surfaceMiss(key, 'threw');
+                return { ok: false, reason: 'threw', detail: String(error && error.message ? error.message : error) };
+              }
+              if (value === undefined || value === null) {
+                surfaceMiss(key, 'missing');
+                return { ok: false, reason: 'missing' };
+              }
+              if (typeof extract !== 'function') return { ok: true, value };
+              try {
+                const out = extract(value);
+                if (out === undefined) {
+                  surfaceMiss(key, 'shape');
+                  return { ok: false, reason: 'shape' };
+                }
+                return { ok: true, value: out };
+              } catch (error) {
+                surfaceMiss(key, 'threw');
+                return { ok: false, reason: 'threw', detail: String(error && error.message ? error.message : error) };
+              }
+            };
+            const surfaceSize = (owner, key) => surfaceRead(owner, key, (value) => (typeof value.size === 'number' ? value.size : undefined));
+            const surfaceKeys = (owner, key) => surfaceRead(owner, key, (value) => (typeof value.keys === 'function' ? [...value.keys()] : undefined));
+            const surfaceGet = (owner, key, name) => {
+              const read = surfaceRead(owner, key, (value) => (typeof value.get === 'function' ? { value: value.get(name) } : undefined));
+              return read.ok ? { ok: true, value: read.value.value } : read;
+            };
+            state.assemblerSurface = surface;
+
             const assemblerProbe = (assembler) => {
               const out = {};
-              try {
-                out.viewDefs = assembler.viewDefinitions.entries().map((definition) => definition.target);
-              } catch (error) { out.viewDefs = String(error); }
-              try {
-                out.byTarget = [...assembler.contextsByTarget].map(([target, set]) => target + ':' + set.size);
-              } catch (error) { out.byTarget = String(error); }
-              try {
+              const show = (read) => (read.ok ? read.value : 'unavailable:' + read.reason);
+              out.viewDefs = show(surfaceRead(assembler, 'viewDefinitions', (value) => (
+                typeof value.entries === 'function'
+                  ? value.entries().map((definition) => definition.target)
+                  : undefined
+              )));
+              out.byTarget = show(surfaceRead(assembler, 'contextsByTarget', (value) => (
+                typeof value[Symbol.iterator] === 'function'
+                  ? [...value].map(([target, set]) => target + ':' + (set && typeof set.size === 'number' ? set.size : '?'))
+                  : undefined
+              )));
+              out.kinds = show(surfaceRead(assembler, 'contexts', (value) => {
+                if (typeof value.values !== 'function') return undefined;
                 const kinds = {};
-                for (const context of assembler.contexts.values()) {
+                for (const context of value.values()) {
                   const kind = context.definition && context.definition.kind ? context.definition.kind : '?';
                   kinds[kind] = (kinds[kind] || 0) + 1;
                 }
-                out.kinds = kinds;
-              } catch (error) { out.kinds = String(error); }
-              try { out.views = [...assembler.views.keys()]; } catch (error) { out.views = String(error); }
-              try {
-                const chat = assembler.contextsByTarget.get('chat');
-                out.chatContexts = chat
-                  ? [...chat].slice(0, 4).map((context) => ({
-                    kind: context.definition && context.definition.kind,
-                    state: context.state === undefined ? 'undef' : 'set',
-                    build: typeof (context.definition && context.definition.buildViewNode),
-                  }))
-                  : null;
-              } catch (error) { out.chatContexts = String(error); }
-              try {
-                const view = assembler.views.get('chat');
-                out.chatView = view
-                  ? {
-                    builderId: builderIdOf(view.builder),
-                    builder: view.builder === undefined ? 'undef' : 'set',
-                    snapshot: view.snapshot === undefined ? 'undef' : 'set',
-                    order: view.snapshot && Array.isArray(view.snapshot.order) ? view.snapshot.order.length : null,
-                    group: view.groupDefinition ? view.groupDefinition.kind : null,
-                    create: typeof (view.definition && view.definition.create),
-                  }
-                  : null;
-              } catch (error) { out.chatView = String(error); }
-              try {
-                const timeline = assembler.locationIndex.snapshot();
-                out.turns = Array.isArray(timeline.turnOrder) ? timeline.turnOrder.length : null;
-              } catch (error) { out.turns = String(error); }
-              try {
-                const group = assembler.groups.get('chat');
-                out.chatGroup = group
-                  ? { entries: group.store ? group.store.entries.length : null, def: group.definition ? group.definition.kind : null }
-                  : null;
-              } catch (error) { out.chatGroup = String(error); }
+                return kinds;
+              }));
+              out.views = show(surfaceKeys(assembler, 'views'));
+              out.chatContexts = show(surfaceRead(assembler, 'contextsByTarget', (value) => {
+                if (typeof value.get !== 'function') return undefined;
+                const chat = value.get('chat');
+                if (!chat) return null;
+                return [...chat].slice(0, 4).map((context) => ({
+                  kind: context.definition && context.definition.kind,
+                  state: context.state === undefined ? 'undef' : 'set',
+                  build: typeof (context.definition && context.definition.buildViewNode),
+                }));
+              }));
+              out.chatView = show(surfaceRead(assembler, 'views', (value) => {
+                if (typeof value.get !== 'function') return undefined;
+                const view = value.get('chat');
+                if (!view) return null;
+                return {
+                  builderId: builderIdOf(view.builder),
+                  builder: view.builder === undefined ? 'undef' : 'set',
+                  snapshot: view.snapshot === undefined ? 'undef' : 'set',
+                  order: view.snapshot && Array.isArray(view.snapshot.order) ? view.snapshot.order.length : null,
+                  group: view.groupDefinition ? view.groupDefinition.kind : null,
+                  create: typeof (view.definition && view.definition.create),
+                };
+              }));
+              out.turns = show(surfaceRead(assembler, 'locationIndex', (value) => {
+                if (typeof value.snapshot !== 'function') return undefined;
+                const timeline = value.snapshot();
+                return Array.isArray(timeline.turnOrder) ? timeline.turnOrder.length : null;
+              }));
+              out.chatGroup = show(surfaceRead(assembler, 'groups', (value) => {
+                if (typeof value.get !== 'function') return undefined;
+                const group = value.get('chat');
+                if (!group) return null;
+                return {
+                  entries: group.store && Array.isArray(group.store.entries) ? group.store.entries.length : null,
+                  def: group.definition ? group.definition.kind : null,
+                };
+              }));
               return out;
             };
 
@@ -1598,23 +1668,32 @@ const INSTRUMENT = DIAG && DEBUG;
                 if (!assembler) return { ok: false, why: 'no-assembler' };
                 const out = { ok: true };
                 try { out.revision = binding.revision; } catch {}
-                try { out.inputs = assembler.inputs.size; } catch {}
-                try { out.contexts = assembler.contexts.size; } catch {}
+                const inputs = surfaceSize(assembler, 'inputs');
+                if (inputs.ok) out.inputs = inputs.value;
+                const contexts = surfaceSize(assembler, 'contexts');
+                if (contexts.ok) out.contexts = contexts.value;
                 try { out.active = [...assembler.activeTargets]; } catch {}
                 try { out.replacePending = assembler.replacePending === true; } catch {}
                 try { out.dirty = assembler.dirty.size; } catch {}
-                try { out.groups = [...assembler.groups.keys()]; } catch {}
-                try {
-                  const group = assembler.groups.get('chat');
-                  out.chatEntries = group && group.store ? group.store.entries.length : null;
-                } catch {}
-                try {
-                  const view = assembler.views.get('chat');
+                const groups = surfaceKeys(assembler, 'groups');
+                if (groups.ok) out.groups = groups.value;
+                const chatGroup = surfaceGet(assembler, 'groups', 'chat');
+                out.chatEntries = chatGroup.ok && chatGroup.value && chatGroup.value.store && Array.isArray(chatGroup.value.store.entries)
+                  ? chatGroup.value.store.entries.length
+                  : null;
+                const chatView = surfaceRead(assembler, 'views', (value) => {
+                  if (typeof value.get !== 'function') return undefined;
+                  const view = value.get('chat');
                   const snapshot = view ? view.snapshot : null;
-                  out.chatView = snapshot
+                  return snapshot
                     ? { order: Array.isArray(snapshot.order) ? snapshot.order.length : null, builderId: builderIdOf(view.builder) }
                     : null;
-                } catch {}
+                });
+                out.chatView = chatView.ok ? chatView.value : null;
+                if (surface.degraded) {
+                  out.degraded = true;
+                  out.surface = surface.missing.slice();
+                }
                 if (deep === true) {
                   try { out.assembler = assemblerProbe(assembler); } catch (error) { out.assembler = String(error); }
                 }
@@ -1651,6 +1730,7 @@ const INSTRUMENT = DIAG && DEBUG;
             const assemblyWatch = (flow) => {
               const conversation = conversationProbe();
               if (!conversation.ok) return false;
+              if (surface.degraded) return false;
               if (!(conversation.inputs > 0)) return false;
               if (conversation.chatEntries !== 0 && conversation.chatEntries !== null) return false;
               const previous = nudges.get(flow);
@@ -1686,6 +1766,12 @@ const INSTRUMENT = DIAG && DEBUG;
               state.healed += 1;
               state.blank = payload;
               const before = conversationProbe(DIAG);
+              // The assembler surface itself is unreadable, so a repair could
+              // not verify its own outcome. Leave the stock page alone.
+              if (surface.degraded) {
+                state.heal = { action: 'skipped-degraded', at: Math.round(performance.now()), before };
+                return;
+              }
               // A window that carries an executed rewind is not broken: walk
               // back instead of re-publishing the same all-hidden order.
               if (windowRewound()) {
@@ -1911,9 +1997,10 @@ const INSTRUMENT = DIAG && DEBUG;
                 const conversation = ctx && typeof ctx.get === 'function' ? ctx.get('uiConversation') : undefined;
                 const binding = conversationBindingOf(conversation, currentSessionId());
                 const assembler = binding && binding.assembler;
-                if (!assembler || !assembler.views) return false;
-                const view = assembler.views.get('chat');
-                const builder = view && view.builder;
+                if (!assembler) return false;
+                const views = surfaceGet(assembler, 'views', 'chat');
+                if (!views.ok || !views.value) return false;
+                const builder = views.value.builder;
                 if (!builder) return false;
                 const proto = Object.getPrototypeOf(builder);
                 if (!proto || typeof proto.replace !== 'function') return false;
@@ -1987,8 +2074,13 @@ const INSTRUMENT = DIAG && DEBUG;
                 if (!conversation || !sessionId) return false;
                 const binding = conversationBindingOf(conversation, sessionId);
                 const assembler = binding && binding.assembler;
-                if (!assembler || !assembler.activeTargets || typeof assembler.activateTarget !== 'function') return false;
-                assembler.activeTargets.delete('chat');
+                if (!assembler || typeof assembler.activateTarget !== 'function') return false;
+                // A repair-only field: when it is gone the re-activation is
+                // skipped quietly instead of degrading the whole page.
+                let active = null;
+                try { active = assembler.activeTargets; } catch { active = null; }
+                if (!active || typeof active.delete !== 'function') return false;
+                active.delete('chat');
                 assembler.activateTarget('chat');
                 const snapshot = typeof assembler.snapshot === 'function' ? assembler.snapshot('chat') : undefined;
                 const order = snapshot && Array.isArray(snapshot.order) ? snapshot.order.length : 0;
@@ -2111,6 +2203,7 @@ const INSTRUMENT = DIAG && DEBUG;
               if (!feed.ok || feed.openState !== 'open') return false;
               const conversation = conversationProbe();
               if (!conversation.ok) return false;
+              if (surface.degraded) return false;
               if (!(conversation.inputs > 0)) return false;
               if (conversation.chatEntries !== 0 && conversation.chatEntries !== null) return false;
               if (document.querySelector('[data-slot="conversation.chat.node"]')) return false;
@@ -2270,7 +2363,7 @@ const INSTRUMENT = DIAG && DEBUG;
                 flows,
                 slotErrors: [...document.querySelectorAll('[data-slot-error]')].map((node) => node.getAttribute('data-slot-error')),
                 factoryErrors: [...document.querySelectorAll('[data-factory-error]')].map((node) => node.getAttribute('data-factory-error')),
-                client: { build: BUILD, lazyGroups: state.lazyGroups, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, runningSkips: state.runningSkips, healed: state.healed, repairs: state.repairs, advance: state.advance, prewarm: state.prewarm, restorePrewarm: state.restorePrewarm, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error },
+                client: { build: BUILD, lazyGroups: state.lazyGroups, patched: state.patched, flushError: state.flushError, builderLog, flushes: state.flushes, lastFlush: state.lastFlush, buildSeen: state.buildSeen, buildDone: state.buildDone, lastBuildTarget: state.lastBuildTarget, scans: state.scans, loads: state.loads, skipped: state.skipped, runningSkips: state.runningSkips, healed: state.healed, repairs: state.repairs, advance: state.advance, prewarm: state.prewarm, restorePrewarm: state.restorePrewarm, rewound: windowRewound(), heal: state.heal, heals: heals.slice(-4), flushLog: flushLog.slice(-6), buildLog: buildLog.slice(-4), stuck: state.stuck.slice(-2), guard: state.guard, last: state.last, error: state.error, surface: state.assemblerSurface ? { degraded: state.assemblerSurface.degraded, missing: state.assemblerSurface.missing.slice(), warned: surfaceWarned.value } : null },
                 fibers: fiberProbe(),
                 feed: sessionFeed(true),
                 conversation: conversationProbe(true),
@@ -2339,9 +2432,9 @@ const INSTRUMENT = DIAG && DEBUG;
                             same: bound === ownerBinding,
                             active: asm.activeTargets ? [...asm.activeTargets] : null,
                             order: asm.snapshot ? (asm.snapshot('chat') || {}).order && asm.snapshot('chat').order.length : null,
-                            inputs: asm.inputs ? asm.inputs.size : null,
+                            inputs: (() => { const read = surfaceSize(asm, 'inputs'); return read.ok ? read.value : null; })(),
                             pending: asm.replacePending === true,
-                            views: asm.views ? [...asm.views.keys()] : null,
+                            views: (() => { const read = surfaceKeys(asm, 'views'); return read.ok ? read.value : null; })(),
                           });
                         }
                         return out;
