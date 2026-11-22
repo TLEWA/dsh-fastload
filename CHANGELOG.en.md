@@ -7,6 +7,8 @@ All notable changes are documented here. Versions follow
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-11-22
+
 ### Added
 
 - **A dedicated opening window while a Session streams (`DSH_FASTLOAD_RUNNING_MAX_MESSAGES`,
